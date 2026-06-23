@@ -128,12 +128,23 @@ def render(coin, chart_label):
     except requests.exceptions.RequestException as exc:
         st.warning(f"Couldn't load candle chart: {exc}")
 
-    levels = f"Support: ${report['support']:,.2f}  |  Resistance: ${report['resistance']:,.2f}"
-    if report["invalidation"]:
-        levels += f"  |  Invalidation: ${report['invalidation']:,.2f}"
-    if report["target"]:
-        levels += f"  |  Target: ${report['target']:,.2f}"
-    st.write(levels)
+    levels = st.columns(4)
+    levels[0].metric(
+        "Support", f"${report['support']:,.2f}",
+        help="Price floor based on the recent 30-day low - where buying has historically been strong enough to stop declines.",
+    )
+    levels[1].metric(
+        "Resistance", f"${report['resistance']:,.2f}",
+        help="Price ceiling based on the recent 30-day high - where selling has historically been strong enough to stop rallies.",
+    )
+    levels[2].metric(
+        "Invalidation", f"${report['invalidation']:,.2f}" if report["invalidation"] else "-",
+        help="Your stop-loss: if price reaches here, the current Long/Short thesis is considered wrong. Set at 1.5x the daily ATR (volatility) away from price.",
+    )
+    levels[3].metric(
+        "Target", f"${report['target']:,.2f}" if report["target"] else "-",
+        help="Your take-profit: the nearest ICT liquidity pool or Fair Value Gap in the trade's favorable direction, where price is likely to react.",
+    )
     if report["ath"]:
         st.caption(f"All-time high: ${report['ath']:,.2f}  |  All-time low: ${report['atl']:,.2f}")
 
@@ -145,8 +156,9 @@ def render(coin, chart_label):
     if report["headlines"]:
         st.subheader("Recent Headlines")
         for h in report["headlines"]:
-            tag = "(coin-specific)" if h["relevant"] else "(general market)"
-            st.markdown(f"{tag} [{h['title']}]({h['link']})")
+            tag = "coin-specific" if h["relevant"] else "general market"
+            when = h["published"].strftime("%b %d, %Y %H:%M UTC") if h["published"] else "date unknown"
+            st.markdown(f"**{when}** ({tag}) - [{h['title']}]({h['link']})")
 
     st.divider()
     st.subheader(f"{coin} score history (this session)")

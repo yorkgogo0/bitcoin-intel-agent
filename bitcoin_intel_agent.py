@@ -324,7 +324,8 @@ def main(coin="BTC"):
         print("Recent Headlines:")
         for h in report["headlines"]:
             tag = "[coin-specific]" if h["relevant"] else "[general market]"
-            print(f"  {tag} {h['title']}")
+            when = h["published"].strftime("%b %d, %Y %H:%M UTC") if h["published"] else "date unknown"
+            print(f"  {tag} ({when}) {h['title']}")
             print(f"      {h['link']}")
     print("=" * 60)
 

@@ -3,6 +3,8 @@
 import os
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import requests
 
@@ -103,10 +105,19 @@ def fetch_news_headlines(coin, limit=6):
             for item in root.findall("./channel/item"):
                 title = (item.findtext("title") or "").strip()
                 link = (item.findtext("link") or "").strip()
+                pub_date = item.findtext("pubDate") or ""
+                try:
+                    published = parsedate_to_datetime(pub_date).astimezone(timezone.utc) if pub_date else None
+                except (TypeError, ValueError):
+                    published = None
                 if title and link:
-                    items.append({"title": title, "link": link})
+                    items.append({"title": title, "link": link, "published": published})
         except (requests.exceptions.RequestException, ET.ParseError):
             continue
+
+    # Two feeds merged in fetch order, not recency - sort so the newest shows first
+    # regardless of source. Undated items (parse failures) sort last, not first.
+    items.sort(key=lambda i: i["published"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
 
     keywords = COIN_KEYWORDS.get(coin, [])
     relevant = [i for i in items if any(k in i["title"].lower() for k in keywords)]
