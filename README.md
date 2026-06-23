@@ -1,15 +1,16 @@
 # bitcoin-intel-agent
 
-A minimal, free-to-run version of the Bitcoin Intelligence Agent plan: pulls live data,
-fuses it into a probabilistic regime score, and prints a structured report. No paid
-APIs, no streaming infrastructure, no database - just a script you run on demand.
+A minimal, free-to-run market intelligence tool for any coin listed on Hyperliquid (BTC,
+ETH, SOL, HYPE, ...): pulls live data, fuses it into a probabilistic regime score, and
+shows it as a report or a live-updating web dashboard. No paid APIs, no streaming
+infrastructure, no database.
 
-## Data sources (all free, no signup)
+## Data sources (all free; only FRED needs a signup)
 
-- **Price/technical** - [Binance public market data](https://data-api.binance.vision) (BTCUSDT klines, 1h/4h/1d)
-- **On-chain** - [mempool.space API](https://mempool.space/docs/api) (difficulty adjustment trend)
+- **Price/technical** - Hyperliquid's own `candleSnapshot` API (1h/4h/1d candles, works for any coin listed there)
+- **Perp funding/OI/volume** - [Hyperliquid public info API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)
+- **On-chain (BTC only)** - [mempool.space API](https://mempool.space/docs/api) (difficulty adjustment trend)
 - **Sentiment** - [Alternative.me Fear & Greed Index](https://alternative.me/crypto/fear-and-greed-index/)
-- **Perp funding/OI** - [Hyperliquid public info API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) (BTC funding rate, open interest)
 - **Macro (optional)** - [FRED API](https://fred.stlouisfed.org/docs/api/fred/) (broad USD index) - needs a free API key, see Setup below
 
 ## Setup
@@ -30,9 +31,20 @@ Without it, the report just prints "Macro: skipped" and everything else works as
 
 ## Run
 
+CLI, defaults to BTC:
+
 ```
 python bitcoin_intel_agent.py
 ```
+
+Live web dashboard (pick any coin, auto-refreshes):
+
+```
+streamlit run dashboard.py
+```
+
+Opens at http://localhost:8501. The refresh interval is capped at a 10-second minimum
+in the sidebar to stay well within the free APIs' rate limits.
 
 ## How scoring works
 
@@ -40,28 +52,29 @@ Each timeframe (1h/4h/1d) gets a 0-100 score from price vs. moving averages, RSI
 Stochastic RSI, MACD momentum, and Bollinger Band extension, then the three are weighted
 toward the daily chart. Fear & Greed is applied as a contrarian tilt (extreme fear nudges
 the score up, extreme greed nudges it down) and also raises the Risk Score when it's at
-an extreme. On-chain difficulty trend adds a small fundamental tilt. Hyperliquid's BTC
-funding rate gets the same contrarian treatment - crowded longs (positive funding) nudge
-the score down, crowded shorts nudge it up, and extreme funding raises the Risk Score.
-Daily ATR (volatility) feeds the Risk Score and sets the Invalidation level (1.5x ATR from
-price). Confidence drops when timeframes disagree or sentiment is extreme. All of this is
-transparent rule-based logic, not a trained ML model - see "Key Reasons" in the output for
-exactly what drove each score.
+an extreme. On-chain difficulty trend (BTC only) adds a small fundamental tilt.
+Hyperliquid's funding rate gets the same contrarian treatment - crowded longs (positive
+funding) nudge the score down, crowded shorts nudge it up, and extreme funding raises the
+Risk Score. Daily ATR (volatility) feeds the Risk Score and sets the Invalidation level
+(1.5x ATR from price). Confidence drops when timeframes disagree or sentiment is extreme.
+All of this is transparent rule-based logic, not a trained ML model - see "Key Reasons" in
+the output for exactly what drove each score.
 
-Each run appends a row to `history.csv` (gitignored - it's your local run history) so
-you can track Bull Score/Risk Score over time.
+Each run appends a row to `history.csv` (gitignored - it's your local run history, now
+tagged per coin) so you can track Bull Score/Risk Score over time.
 
 ## Project layout
 
 - `indicators.py` - pure math (SMA, EMA, RSI, StochRSI, MACD, Bollinger Bands, ATR), no I/O
 - `data_sources.py` - all the API calls
-- `bitcoin_intel_agent.py` - fuses signals into a score and prints/logs the report
+- `bitcoin_intel_agent.py` - fuses signals into a score; `run_analysis(coin)` is the reusable entry point
+- `dashboard.py` - Streamlit live web UI on top of `run_analysis`
 
 ## Not in this version
 
-Compared to the original plan (`Executive Summary.pdf`): no Kafka/streaming, no
-database, no social/news ingestion (X/Twitter has no free tier), no ML model, no
-backtesting, no dashboard. This is a starting point to build on, not the full system.
+Still no Kafka/streaming, no database, no social/news ingestion (X/Twitter has no free
+tier), no ML model, no rigorous backtesting, no wallet/whale tracking. This is a starting
+point to build on, not the full system envisioned in the original research.
 
 **This is not financial advice.** Bull/Risk scores are simple, transparent heuristics for
 research and learning, not predictions, and this script never touches a wallet, exchange
