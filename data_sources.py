@@ -2,6 +2,7 @@
 
 import os
 import time
+import xml.etree.ElementTree as ET
 
 import requests
 
@@ -9,9 +10,16 @@ MEMPOOL_BASE = "https://mempool.space/api"
 FNG_URL = "https://api.alternative.me/fng/"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+NEWS_FEEDS = ["https://www.coindesk.com/arc/outboundfeeds/rss/", "https://cointelegraph.com/rss"]
+COIN_KEYWORDS = {
+    "BTC": ["bitcoin", "btc"],
+    "ETH": ["ethereum", "eth "],
+    "SOL": ["solana", "sol "],
+    "HYPE": ["hyperliquid", "hype "],
+}
 REQUEST_TIMEOUT = 10
 
-INTERVAL_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+INTERVAL_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000, "1w": 604_800_000}
 
 
 def fetch_hl_candles(coin, interval, limit=210):
@@ -82,3 +90,29 @@ def fetch_fred_latest(series_id):
         return None
     latest, previous = float(obs[0]["value"]), float(obs[1]["value"])
     return {"value": latest, "change_pct": (latest - previous) / previous * 100}
+
+
+def fetch_news_headlines(coin, limit=6):
+    """Plain RSS, no key needed. One feed being down shouldn't break the others."""
+    items = []
+    for url in NEWS_FEEDS:
+        try:
+            resp = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+            for item in root.findall("./channel/item"):
+                title = (item.findtext("title") or "").strip()
+                link = (item.findtext("link") or "").strip()
+                if title and link:
+                    items.append({"title": title, "link": link})
+        except (requests.exceptions.RequestException, ET.ParseError):
+            continue
+
+    keywords = COIN_KEYWORDS.get(coin, [])
+    relevant = [i for i in items if any(k in i["title"].lower() for k in keywords)]
+    general = [i for i in items if i not in relevant]
+
+    result = [dict(i, relevant=True) for i in relevant[:limit]]
+    if len(result) < limit:
+        result += [dict(i, relevant=False) for i in general[: limit - len(result)]]
+    return result

@@ -11,7 +11,17 @@ from data_sources import (
     fetch_fred_latest,
     fetch_hl_candles,
     fetch_hyperliquid_market_ctx,
+    fetch_news_headlines,
     fetch_onchain_signal,
+)
+from ict import (
+    find_fair_value_gaps,
+    find_liquidity_pools,
+    find_swing_points,
+    market_structure,
+    nearest_target,
+    premium_discount_zone,
+    unfilled_gaps,
 )
 from indicators import atr, bollinger_bands, macd_histogram, rsi, sma, stoch_rsi
 
@@ -81,7 +91,27 @@ def analyze_timeframe(interval, coin):
     }
 
 
-def fuse(timeframe_results, fear_greed, onchain, funding, macro):
+def compute_ict_structure(daily_candles, current_price):
+    swing_highs, swing_lows = find_swing_points(daily_candles)
+    open_gaps = unfilled_gaps(find_fair_value_gaps(daily_candles), daily_candles)
+    structure = market_structure(swing_highs, swing_lows, current_price)
+
+    zone = None
+    if swing_highs and swing_lows:
+        range_high = max(p[1] for p in swing_highs)
+        range_low = min(p[1] for p in swing_lows)
+        zone = premium_discount_zone(current_price, range_high, range_low)
+
+    return {
+        "structure": structure,
+        "zone": zone,
+        "pools_above": find_liquidity_pools(swing_highs),
+        "pools_below": find_liquidity_pools(swing_lows),
+        "open_gaps": open_gaps,
+    }
+
+
+def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict):
     weighted_score = sum(r["score"] * TIMEFRAME_WEIGHTS[r["interval"]] for r in timeframe_results)
     reasons = [r for tr in timeframe_results for r in tr["reasons"]]
     risk_score = 30.0
@@ -124,6 +154,28 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro):
         vol_pct = daily["atr"] / daily["price"] * 100
         risk_score += min(20.0, vol_pct * 3)
         reasons.append(f"Volatility: daily ATR is {vol_pct:.1f}% of price")
+
+    structure = ict["structure"]
+    structure_text = {
+        "bullish_bos": f"Structure: bullish break of structure above {structure.get('last_swing_high', 0):,.2f}",
+        "bullish_choch": f"Structure: bullish change of character above {structure.get('last_swing_high', 0):,.2f}",
+        "bearish_bos": f"Structure: bearish break of structure below {structure.get('last_swing_low', 0):,.2f}",
+        "bearish_choch": f"Structure: bearish change of character below {structure.get('last_swing_low', 0):,.2f}",
+    }
+    structure_tilt = {"bullish_bos": 8, "bullish_choch": 6, "bearish_bos": -8, "bearish_choch": -6}
+    if structure["signal"] in structure_tilt:
+        weighted_score += structure_tilt[structure["signal"]]
+        reasons.append(structure_text[structure["signal"]])
+    else:
+        reasons.append(f"Structure: {structure['trend']}, no fresh break of structure")
+
+    if ict["zone"] is not None:
+        zone_tilt = 3 if ict["zone"]["zone"] == "discount" else -3
+        weighted_score += zone_tilt
+        reasons.append(
+            f"ICT zone: price in {ict['zone']['zone']} "
+            f"({ict['zone']['pct_of_range'] * 100:.0f}% of recent swing range)"
+        )
 
     scores = [r["score"] for r in timeframe_results]
     disagreement = max(scores) - min(scores)
@@ -192,12 +244,27 @@ def run_analysis(coin="BTC"):
     except requests.exceptions.RequestException:
         macro = None
 
-    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding, macro)
-    regime = classify_regime(bull_score)
-    bias = trade_bias(bull_score, risk_score)
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
     hourly = next(r for r in timeframe_results if r["interval"] == "1h")
+    ict = compute_ict_structure(daily["candles"], daily["price"])
+
+    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding, macro, ict)
+    regime = classify_regime(bull_score)
+    bias = trade_bias(bull_score, risk_score)
     invalidation = invalidation_level(daily, bias)
+    target = nearest_target(bias, daily["price"], ict["pools_above"] + ict["pools_below"], ict["open_gaps"])
+
+    try:
+        weekly_candles = fetch_hl_candles(coin, "1w", limit=500)
+        ath = max(c["high"] for c in weekly_candles)
+        atl = min(c["low"] for c in weekly_candles)
+    except requests.exceptions.RequestException:
+        ath = atl = None
+
+    try:
+        headlines = fetch_news_headlines(coin)
+    except requests.exceptions.RequestException:
+        headlines = []
 
     return {
         "coin": coin,
@@ -212,10 +279,14 @@ def run_analysis(coin="BTC"):
         "support": daily["recent_low"],
         "resistance": daily["recent_high"],
         "invalidation": invalidation,
+        "target": target,
+        "ath": ath,
+        "atl": atl,
         "open_interest_usd": funding["open_interest_usd"],
         "day_volume_usd": funding["day_volume_usd"],
         "fear_greed": fear_greed["value"],
         "reasons": reasons,
+        "headlines": headlines,
     }
 
 
@@ -240,10 +311,21 @@ def main(coin="BTC"):
     print(f"Support: ${report['support']:,.2f}  |  Resistance: ${report['resistance']:,.2f}")
     if report["invalidation"]:
         print(f"Invalidation (1.5x daily ATR): ${report['invalidation']:,.2f}")
+    if report["target"]:
+        print(f"Target (nearest liquidity/FVG): ${report['target']:,.2f}")
+    if report["ath"]:
+        print(f"All-time high (since listing): ${report['ath']:,.2f}  |  All-time low: ${report['atl']:,.2f}")
     print()
     print("Key Reasons:")
     for reason in report["reasons"]:
         print(f"  - {reason}")
+    if report["headlines"]:
+        print()
+        print("Recent Headlines:")
+        for h in report["headlines"]:
+            tag = "[coin-specific]" if h["relevant"] else "[general market]"
+            print(f"  {tag} {h['title']}")
+            print(f"      {h['link']}")
     print("=" * 60)
 
     log_run(
