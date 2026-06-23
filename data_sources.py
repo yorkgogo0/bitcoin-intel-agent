@@ -25,7 +25,7 @@ def fetch_hl_candles(coin, interval, limit=210):
     )
     resp.raise_for_status()
     return [
-        {"open": float(c["o"]), "high": float(c["h"]), "low": float(c["l"]), "close": float(c["c"])}
+        {"time": c["t"], "open": float(c["o"]), "high": float(c["h"]), "low": float(c["l"]), "close": float(c["c"])}
         for c in resp.json()
     ]
 

@@ -45,6 +45,11 @@ def render(coin):
     row2[2].metric("24h Volume", f"${report['day_volume_usd']:,.0f}")
     row2[3].metric("Fear & Greed", report["fear_greed"])
 
+    price_df = pd.DataFrame(report["price_history"], columns=["time", "price"])
+    price_df["time"] = pd.to_datetime(price_df["time"], unit="ms")
+    st.subheader(f"{coin} price (hourly, last ~9 days)")
+    st.line_chart(price_df.set_index("time")["price"])
+
     levels = f"Support: ${report['support']:,.2f}  |  Resistance: ${report['resistance']:,.2f}"
     if report["invalidation"]:
         levels += f"  |  Invalidation: ${report['invalidation']:,.2f}"

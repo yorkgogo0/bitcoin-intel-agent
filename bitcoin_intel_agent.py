@@ -77,6 +77,7 @@ def analyze_timeframe(interval, coin):
         "recent_high": max(c["high"] for c in candles[-30:]),
         "recent_low": min(c["low"] for c in candles[-30:]),
         "atr": atr(candles),
+        "candles": candles,
     }
 
 
@@ -195,12 +196,14 @@ def run_analysis(coin="BTC"):
     regime = classify_regime(bull_score)
     bias = trade_bias(bull_score, risk_score)
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
+    hourly = next(r for r in timeframe_results if r["interval"] == "1h")
     invalidation = invalidation_level(daily, bias)
 
     return {
         "coin": coin,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         "price": daily["price"],
+        "price_history": [(c["time"], c["close"]) for c in hourly["candles"]],
         "bull_score": bull_score,
         "risk_score": risk_score,
         "regime": regime,
