@@ -6,11 +6,18 @@ from datetime import datetime, timezone
 
 import requests
 
-from data_sources import fetch_fear_greed, fetch_hyperliquid_funding, fetch_klines, fetch_onchain_signal
+from data_sources import (
+    fetch_fear_greed,
+    fetch_fred_latest,
+    fetch_hyperliquid_funding,
+    fetch_klines,
+    fetch_onchain_signal,
+)
 from indicators import atr, bollinger_bands, macd_histogram, rsi, sma, stoch_rsi
 
 TIMEFRAME_WEIGHTS = {"1h": 0.25, "4h": 0.35, "1d": 0.40}
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.csv")
+FRED_DOLLAR_INDEX_SERIES = "DTWEXBGS"  # Nominal Broad U.S. Dollar Index
 
 
 def analyze_timeframe(interval):
@@ -73,7 +80,7 @@ def analyze_timeframe(interval):
     }
 
 
-def fuse(timeframe_results, fear_greed, onchain, funding):
+def fuse(timeframe_results, fear_greed, onchain, funding, macro):
     weighted_score = sum(r["score"] * TIMEFRAME_WEIGHTS[r["interval"]] for r in timeframe_results)
     reasons = [r for tr in timeframe_results for r in tr["reasons"]]
     risk_score = 30.0
@@ -101,6 +108,14 @@ def fuse(timeframe_results, fear_greed, onchain, funding):
         f"({'longs crowded, paying shorts' if annualized > 0 else 'shorts crowded, paying longs'}), "
         f"OI ${funding['open_interest_usd']:,.0f}"
     )
+
+    if macro is not None:
+        # Broad dollar index as a BTC headwind/tailwind proxy: a stronger dollar
+        # historically coincides with weaker risk-asset performance, and vice versa.
+        weighted_score += -macro["change_pct"] * 2
+        reasons.append(f"Macro: broad USD index {macro['change_pct']:+.2f}% vs prior reading")
+    else:
+        reasons.append("Macro: skipped (set FRED_API_KEY to enable)")
 
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
     if daily["atr"]:
@@ -173,7 +188,13 @@ def main():
         print(f"Data source unavailable, aborting: {exc}")
         return
 
-    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding)
+    try:
+        macro = fetch_fred_latest(FRED_DOLLAR_INDEX_SERIES)
+    except requests.exceptions.RequestException as exc:
+        print(f"Macro data unavailable ({exc}), continuing without it.")
+        macro = None
+
+    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding, macro)
     regime = classify_regime(bull_score)
     bias = trade_bias(bull_score, risk_score)
 

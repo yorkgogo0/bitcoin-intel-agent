@@ -10,12 +10,23 @@ APIs, no streaming infrastructure, no database - just a script you run on demand
 - **On-chain** - [mempool.space API](https://mempool.space/docs/api) (difficulty adjustment trend)
 - **Sentiment** - [Alternative.me Fear & Greed Index](https://alternative.me/crypto/fear-and-greed-index/)
 - **Perp funding/OI** - [Hyperliquid public info API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) (BTC funding rate, open interest)
+- **Macro (optional)** - [FRED API](https://fred.stlouisfed.org/docs/api/fred/) (broad USD index) - needs a free API key, see Setup below
 
 ## Setup
 
 ```
 pip install -r requirements.txt
 ```
+
+Optional - enable the macro (USD index) signal:
+
+1. Create a free account at https://fred.stlouisfed.org and request an API key at
+   https://fred.stlouisfed.org/docs/api/api_key.html (instant, no cost)
+2. Set it as an environment variable before running:
+   - PowerShell (current session): `$env:FRED_API_KEY = "your-key-here"`
+   - PowerShell (persists across sessions): `setx FRED_API_KEY "your-key-here"` (open a new terminal after)
+
+Without it, the report just prints "Macro: skipped" and everything else works as normal.
 
 ## Run
 
