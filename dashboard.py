@@ -13,6 +13,54 @@ from data_sources import fetch_hl_candles
 COINS = ["BTC", "ETH", "SOL", "HYPE"]
 CHART_INTERVALS = {"Hour": "1h", "Day": "1d", "Week": "1w"}
 
+BULL_STEPS = [  # mirrors classify_regime's own thresholds
+    {"range": [0, 20], "color": "#dc2626"},
+    {"range": [20, 40], "color": "#f87171"},
+    {"range": [40, 60], "color": "#fbbf24"},
+    {"range": [60, 80], "color": "#86efac"},
+    {"range": [80, 100], "color": "#16a34a"},
+]
+RISK_STEPS = [{"range": [0, 30], "color": "#22c55e"}, {"range": [30, 60], "color": "#fbbf24"}, {"range": [60, 100], "color": "#dc2626"}]
+CONFIDENCE_STEPS = [{"range": [0, 40], "color": "#dc2626"}, {"range": [40, 70], "color": "#fbbf24"}, {"range": [70, 100], "color": "#22c55e"}]
+FEAR_GREED_STEPS = [  # matches the conventional Fear & Greed gauge: red=fear, green=greed
+    {"range": [0, 25], "color": "#dc2626"},
+    {"range": [25, 45], "color": "#f97316"},
+    {"range": [45, 55], "color": "#fbbf24"},
+    {"range": [55, 75], "color": "#84cc16"},
+    {"range": [75, 100], "color": "#16a34a"},
+]
+
+
+def make_gauge(title, value, steps, suffix=""):
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=value,
+            title={"text": title, "font": {"size": 15}},
+            number={"font": {"size": 30}, "suffix": suffix},
+            gauge={
+                "axis": {"range": [0, 100], "tickwidth": 1},
+                "bar": {"color": "rgba(0,0,0,0)", "thickness": 0},
+                "bgcolor": "rgba(0,0,0,0)",
+                "steps": steps,
+                "threshold": {"line": {"color": "white", "width": 5}, "thickness": 0.9, "value": value},
+            },
+        )
+    )
+    fig.update_layout(height=200, margin=dict(l=20, r=20, t=45, b=10), paper_bgcolor="rgba(0,0,0,0)")
+    return fig
+
+
+def colored_box(container, label, value, good, bad):
+    """good/bad are sets of values that should render green/red; anything else is yellow."""
+    if value in good:
+        container.success(f"**{label}:** {value}")
+    elif value in bad:
+        container.error(f"**{label}:** {value}")
+    else:
+        container.warning(f"**{label}:** {value}")
+
+
 st.set_page_config(page_title="Hyperliquid Coin Intelligence", layout="wide")
 st.title("Hyperliquid Coin Intelligence")
 st.caption("Transparent rule-based heuristics, not financial advice. Never connects to a wallet or executes trades.")
@@ -37,18 +85,20 @@ def render(coin, chart_label):
         report["regime"], report["bias"], report["confidence"], report["fear_greed"],
     )
 
-    row1 = st.columns(5)
-    row1[0].metric("Bull Score", f"{report['bull_score']:.0f}/100")
-    row1[1].metric("Risk Score", f"{report['risk_score']:.0f}/100")
-    row1[2].metric("Regime", report["regime"])
-    row1[3].metric("Trade Bias", report["bias"])
-    row1[4].metric("Confidence", f"{report['confidence']:.0f}%")
+    gauges = st.columns(4)
+    gauges[0].plotly_chart(make_gauge("Bull Score", report["bull_score"], BULL_STEPS), use_container_width=True)
+    gauges[1].plotly_chart(make_gauge("Risk Score", report["risk_score"], RISK_STEPS), use_container_width=True)
+    gauges[2].plotly_chart(make_gauge("Confidence", report["confidence"], CONFIDENCE_STEPS, suffix="%"), use_container_width=True)
+    gauges[3].plotly_chart(make_gauge("Fear & Greed", report["fear_greed"], FEAR_GREED_STEPS), use_container_width=True)
 
-    row2 = st.columns(4)
+    badges = st.columns(2)
+    colored_box(badges[0], "Market Regime", report["regime"], good={"Bull", "Strong Bull"}, bad={"Bear", "Strong Bear"})
+    colored_box(badges[1], "Trade Bias", report["bias"], good={"Long"}, bad={"Short"})
+
+    row2 = st.columns(3)
     row2[0].metric("Price", f"${report['price']:,.2f}")
     row2[1].metric("Open Interest", f"${report['open_interest_usd']:,.0f}")
     row2[2].metric("24h Volume", f"${report['day_volume_usd']:,.0f}")
-    row2[3].metric("Fear & Greed", report["fear_greed"])
 
     interval = CHART_INTERVALS[chart_label]
     try:
@@ -63,6 +113,8 @@ def render(coin, chart_label):
                     high=candle_df["high"],
                     low=candle_df["low"],
                     close=candle_df["close"],
+                    increasing_line_color="#16a34a",
+                    decreasing_line_color="#dc2626",
                 )
             ]
         )
@@ -103,7 +155,11 @@ def render(coin, chart_label):
         hist_df = hist_df[hist_df["coin"] == coin]
         if len(hist_df) > 1:
             hist_df["timestamp_utc"] = pd.to_datetime(hist_df["timestamp_utc"].str.replace(" UTC", ""))
-            st.line_chart(hist_df.set_index("timestamp_utc")[["bull_score", "risk_score"]])
+            hist_fig = go.Figure()
+            hist_fig.add_trace(go.Scatter(x=hist_df["timestamp_utc"], y=hist_df["bull_score"], name="Bull Score", line={"color": "#16a34a"}))
+            hist_fig.add_trace(go.Scatter(x=hist_df["timestamp_utc"], y=hist_df["risk_score"], name="Risk Score", line={"color": "#dc2626"}))
+            hist_fig.update_layout(height=300, margin=dict(l=10, r=10, t=20, b=10))
+            st.plotly_chart(hist_fig, use_container_width=True)
         else:
             st.caption("Not enough history yet for a chart - it builds up as this keeps refreshing.")
 
