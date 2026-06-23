@@ -1,76 +1,27 @@
-"""Bitcoin Intelligence Agent (MVP) - free, keyless data sources only."""
+"""Bitcoin Intelligence Agent - free, mostly-keyless data sources only."""
 
+import csv
+import os
 from datetime import datetime, timezone
 
 import requests
 
-BINANCE_BASE = "https://data-api.binance.vision/api/v3"
-MEMPOOL_BASE = "https://mempool.space/api"
-FNG_URL = "https://api.alternative.me/fng/"
-REQUEST_TIMEOUT = 10
+from data_sources import fetch_fear_greed, fetch_klines, fetch_onchain_signal
+from indicators import atr, bollinger_bands, macd_histogram, rsi, sma, stoch_rsi
 
 TIMEFRAME_WEIGHTS = {"1h": 0.25, "4h": 0.35, "1d": 0.40}
-
-
-def fetch_klines(interval, limit=210):
-    resp = requests.get(
-        f"{BINANCE_BASE}/klines",
-        params={"symbol": "BTCUSDT", "interval": interval, "limit": limit},
-        timeout=REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    return [
-        {"open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4])}
-        for row in resp.json()
-    ]
-
-
-def sma(values, period):
-    return sum(values[-period:]) / period if len(values) >= period else None
-
-
-def ema_series(values, period):
-    if len(values) < period:
-        return []
-    k = 2 / (period + 1)
-    series = [sum(values[:period]) / period]
-    for price in values[period:]:
-        series.append(price * k + series[-1] * (1 - k))
-    return series
-
-
-def rsi(values, period=14):
-    if len(values) < period + 1:
-        return None
-    gains = [max(values[i] - values[i - 1], 0) for i in range(1, len(values))]
-    losses = [max(values[i - 1] - values[i], 0) for i in range(1, len(values))]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-    if avg_loss == 0:
-        return 100.0
-    return 100 - (100 / (1 + avg_gain / avg_loss))
-
-
-def macd_histogram(values, fast=12, slow=26, signal=9):
-    if len(values) < slow + signal:
-        return None
-    ema_fast, ema_slow = ema_series(values, fast), ema_series(values, slow)
-    offset = len(ema_fast) - len(ema_slow)
-    macd_line = [f - s for f, s in zip(ema_fast[offset:], ema_slow)]
-    signal_line = ema_series(macd_line, signal)
-    return macd_line[-1] - signal_line[-1]
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.csv")
 
 
 def analyze_timeframe(interval):
-    candles = fetch_klines(interval)
+    candles = fetch_klines("BTCUSDT", interval)
     closes = [c["close"] for c in candles]
     price = closes[-1]
     sma20, sma50 = sma(closes, 20), sma(closes, 50)
     rsi14 = rsi(closes)
+    stoch = stoch_rsi(closes)
     hist = macd_histogram(closes)
+    bands = bollinger_bands(closes)
 
     score = 50.0
     reasons = []
@@ -91,9 +42,25 @@ def analyze_timeframe(interval):
             score += 5
             reasons.append(f"{interval}: RSI {rsi14:.0f} oversold")
 
+    if stoch is not None:
+        if stoch >= 0.8:
+            score -= 5
+            reasons.append(f"{interval}: StochRSI {stoch:.2f} overbought")
+        elif stoch <= 0.2:
+            score += 5
+            reasons.append(f"{interval}: StochRSI {stoch:.2f} oversold")
+
     if hist is not None:
         score += 10 if hist > 0 else -10
         reasons.append(f"{interval}: MACD histogram {'positive' if hist > 0 else 'negative'}")
+
+    if bands is not None:
+        if price > bands["upper"]:
+            score -= 5
+            reasons.append(f"{interval}: price above upper Bollinger Band (extended)")
+        elif price < bands["lower"]:
+            score += 5
+            reasons.append(f"{interval}: price below lower Bollinger Band (extended)")
 
     return {
         "interval": interval,
@@ -102,20 +69,8 @@ def analyze_timeframe(interval):
         "reasons": reasons,
         "recent_high": max(c["high"] for c in candles[-30:]),
         "recent_low": min(c["low"] for c in candles[-30:]),
+        "atr": atr(candles),
     }
-
-
-def fetch_fear_greed():
-    resp = requests.get(FNG_URL, params={"limit": 1}, timeout=REQUEST_TIMEOUT)
-    resp.raise_for_status()
-    entry = resp.json()["data"][0]
-    return {"value": int(entry["value"]), "label": entry["value_classification"]}
-
-
-def fetch_onchain_signal():
-    diff = requests.get(f"{MEMPOOL_BASE}/v1/difficulty-adjustment", timeout=REQUEST_TIMEOUT)
-    diff.raise_for_status()
-    return {"difficulty_change_pct": diff.json()["difficultyChange"]}
 
 
 def fuse(timeframe_results, fear_greed, onchain):
@@ -136,6 +91,12 @@ def fuse(timeframe_results, fear_greed, onchain):
         f"On-chain: next difficulty adjustment {diff_change:+.1f}% "
         f"(hashrate {'growing' if diff_change > 0 else 'declining'})"
     )
+
+    daily = next(r for r in timeframe_results if r["interval"] == "1d")
+    if daily["atr"]:
+        vol_pct = daily["atr"] / daily["price"] * 100
+        risk_score += min(20.0, vol_pct * 3)
+        reasons.append(f"Volatility: daily ATR is {vol_pct:.1f}% of price")
 
     scores = [r["score"] for r in timeframe_results]
     disagreement = max(scores) - min(scores)
@@ -169,6 +130,29 @@ def trade_bias(bull_score, risk_score):
     return "Neutral / await clarity"
 
 
+def invalidation_level(daily, bias):
+    if not daily["atr"]:
+        return None
+    if bias == "Long":
+        return daily["price"] - 1.5 * daily["atr"]
+    if bias == "Short":
+        return daily["price"] + 1.5 * daily["atr"]
+    return None
+
+
+def log_run(timestamp, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value):
+    is_new = not os.path.exists(HISTORY_FILE)
+    with open(HISTORY_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(
+                ["timestamp_utc", "price", "bull_score", "risk_score", "regime", "trade_bias", "confidence", "fear_greed"]
+            )
+        writer.writerow(
+            [timestamp, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value]
+        )
+
+
 def main():
     try:
         timeframe_results = [analyze_timeframe(tf) for tf in TIMEFRAME_WEIGHTS]
@@ -183,6 +167,7 @@ def main():
     bias = trade_bias(bull_score, risk_score)
 
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
+    invalidation = invalidation_level(daily, bias)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     print("=" * 60)
@@ -196,11 +181,15 @@ def main():
     print(f"Confidence: {confidence:.0f}%")
     print()
     print(f"Support: ${daily['recent_low']:,.2f}  |  Resistance: ${daily['recent_high']:,.2f}")
+    if invalidation:
+        print(f"Invalidation (1.5x daily ATR): ${invalidation:,.2f}")
     print()
     print("Key Reasons:")
     for reason in reasons:
         print(f"  - {reason}")
     print("=" * 60)
+
+    log_run(now, daily["price"], bull_score, risk_score, regime, bias, confidence, fear_greed["value"])
 
 
 if __name__ == "__main__":
