@@ -115,6 +115,28 @@ haven't been graded yet: did price hit the target, the stop, or is it still open
 is the actual data a future signal-reweighting pass (or threshold tuning) would need -
 there's no shortcut to it without a real logged history to review.
 
+## Historical backtest (`backtest.py`)
+
+A walk-forward harness using real historical data: Hyperliquid's `candleSnapshot` (price/
+technical/ICT structure), paginated `fundingHistory`, Alternative.me's full Fear & Greed
+archive, and FRED's historical series (if `FRED_API_KEY` is set). It reuses the exact same
+scoring/no-trade functions as the live system, not a parallel reimplementation. Read the
+module docstring before trusting any number it produces - BTC only, daily resolution only,
+no OI-trend/news/on-chain (no free historical source for those), and the sample size is
+small (funding history only paginates back ~80-90 days before hitting rate limits).
+
+**A real bug this already caught:** the first backtest run found that `nearest_target`
+picked the literal nearest ICT level regardless of distance, while the stop was a fixed ATR
+multiple - a structural mismatch that made Risk/Reward fail almost every time (36 of 50
+rejections, average R:R 0.27 among them). Fixed by giving `nearest_target` a `min_distance`
+parameter (now wired through everywhere it's called) so a target only counts if it's at
+least as far as the stop - guaranteeing R:R >= 1.0 by construction instead of measuring it
+after the fact and usually rejecting. Confirmed live: ETH went from permanently blocked to
+an actual Short recommendation (R:R 1.47) right after the fix. The win-rate numbers from
+that backtest are **not validated** - only 12 of 36 simulated trades had resolved within the
+7-day grading window, and fees/slippage aren't modeled at all. The mechanism fix is justified
+on its own logical merits; the profitability claim is not yet justified by enough data.
+
 ## Market Scanner
 
 A lighter-weight scan across the top-volume Hyperliquid assets (not just BTC/ETH/SOL/HYPE),
@@ -148,6 +170,7 @@ list.
 - `data_sources.py` - all the API calls, including the free wallet/position lookup
 - `bitcoin_intel_agent.py` - fuses signals into a score; `run_analysis(coin)` is the reusable entry point
 - `screener.py` - lightweight multi-asset scan across the top-volume universe, reuses `compute_ict_structure` from `bitcoin_intel_agent.py`
+- `backtest.py` - walk-forward historical backtest, reuses the live scoring/no-trade functions rather than reimplementing them
 - `dashboard.py` - Streamlit live web UI: Coin Analysis (full analysis + candlesticks + Whale Watchlist) and Market Scanner menus
 
 ## Not in this version

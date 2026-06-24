@@ -109,12 +109,11 @@ def quick_score(market_ctx):
     bias = "Long" if bull_score >= 60 else "Short" if bull_score <= 40 else None
     target, invalidation, risk_reward = None, None, None
     if bias and daily_atr:
-        target = nearest_target(bias, daily_price, ict["pools_above"] + ict["pools_below"], ict["open_gaps"])
         invalidation = daily_price - 1.5 * daily_atr if bias == "Long" else daily_price + 1.5 * daily_atr
+        stop_distance = abs(daily_price - invalidation)
+        target = nearest_target(bias, daily_price, ict["pools_above"] + ict["pools_below"], ict["open_gaps"], min_distance=stop_distance)
         if target:
-            risk_amt = abs(daily_price - invalidation)
-            reward_amt = abs(target - daily_price)
-            risk_reward = reward_amt / risk_amt if risk_amt else None
+            risk_reward = abs(target - daily_price) / stop_distance if stop_distance else None
 
     return {
         "coin": coin,

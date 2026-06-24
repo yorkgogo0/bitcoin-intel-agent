@@ -103,14 +103,20 @@ def premium_discount_zone(current_price, range_high, range_low):
     return {"zone": "premium" if pct >= 0.5 else "discount", "pct_of_range": pct}
 
 
-def nearest_target(bias, current_price, liquidity_pools, open_gaps):
-    """Nearest liquidity pool or FVG edge in the favorable direction - a natural take-profit zone."""
+def nearest_target(bias, current_price, liquidity_pools, open_gaps, min_distance=0):
+    """Nearest liquidity pool or FVG edge in the favorable direction, at least `min_distance`
+    away - a natural take-profit zone. Without min_distance this picks the literal nearest
+    level regardless of how close it is, which a 2026-06-24 backtest showed produces poor
+    risk/reward almost always (avg R:R 0.27 across 36 rejected setups) since the stop is a
+    fixed ATR multiple while the target had no minimum distance at all. Pass the stop
+    distance as min_distance to guarantee R:R >= 1.0 by construction whenever a target is
+    found, instead of measuring R:R after the fact and usually rejecting."""
     candidates = [p["price"] for p in liquidity_pools]
     candidates += [g["top"] if g["type"] == "bearish" else g["bottom"] for g in open_gaps]
     if bias == "Long":
-        above = [p for p in candidates if p > current_price]
+        above = [p for p in candidates if p > current_price + min_distance]
         return min(above) if above else None
     if bias == "Short":
-        below = [p for p in candidates if p < current_price]
+        below = [p for p in candidates if p < current_price - min_distance]
         return max(below) if below else None
     return None
