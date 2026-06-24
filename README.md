@@ -85,26 +85,50 @@ against falling price reads as a crowd building against price (squeeze risk eith
 Each run appends a row to `history.csv` (gitignored - it's your local run history, now
 tagged per coin) so you can track Bull Score/Risk Score/OI over time.
 
-## No-trade rules and recommendation logging
+## No-trade rules and tiered position sizing
 
 Every signal that contributes to the Bull Score is tagged as **supporting** or
 **conflicting** relative to the final call, not just dumped into one flat list. A raw
-Long/Short call gets overridden to **No Trade** if any of these hold:
+Long/Short call gets a **size tier** instead of a single pass/fail cutoff:
 
-- Confidence is below 70%
-- Conflicting signals outnumber (or tie) supporting signals
-- Risk/Reward is below 1.0 (Invalidation is farther from price than Target)
+- Below 50% confidence: blocked entirely (**No Trade**)
+- 50-59%: **Small** size tier
+- 60-69%: **Normal** size tier
+- 70%+: **Full** size tier
 
-"A missed trade is preferable to a bad trade" - these are deliberately conservative, not
-tuned to maximize how often a trade gets recommended.
+Regardless of confidence, a call is still blocked entirely (**No Trade**) if conflicting
+signals outnumber (or tie) supporting signals, or if Risk/Reward is below 1.0 - those are
+evidence-quality gates, not a frequency dial. "Do not force trades when evidence is weak"
+applies to those, not to confidence level itself.
+
+**Honest caveat:** the exact tier cutoffs (50/60/70) are a reasonable starting point, not a
+backtested result - there isn't enough logged history yet to validate them against. Treat
+them as provisional until `review_recommendations()` has enough graded history to tune
+against.
 
 Every Long/Short call (whether or not it survives the no-trade filter) gets logged to
-`recommendations.csv` (gitignored) with the full reasoning, confidence, entry/stop/target,
-risk/reward, and the supporting/conflicting signal lists - a durable record for reviewing
-later. `review_recommendations(coin, current_price)` grades past calls that haven't been
-graded yet: did price hit the target, the stop, or is it still open. This is the actual
-data a future signal-reweighting pass would need - there's no shortcut to it without a
-real logged history to review.
+`recommendations.csv` (gitignored) with the full reasoning, confidence, size tier, entry/
+stop/target, risk/reward, and the supporting/conflicting signal lists - a durable record
+for reviewing later. `review_recommendations(coin, current_price)` grades past calls that
+haven't been graded yet: did price hit the target, the stop, or is it still open.
+`rejection_summary()` reports how many calls were rejected and by which specific rule. This
+is the actual data a future signal-reweighting pass (or threshold tuning) would need -
+there's no shortcut to it without a real logged history to review.
+
+## Market Scanner
+
+A lighter-weight scan across the top-volume Hyperliquid assets (not just BTC/ETH/SOL/HYPE),
+in its own dashboard menu. Deliberately capped to the top ~25-50 assets by 24h volume, not
+all ~230 tradable perps: the top 25 capture roughly 97-98% of total trading volume on
+Hyperliquid, and the long tail includes literally zero-volume markets where a "score" would
+be noise, not signal. `screener.py` computes a cheaper version of the score (technical +
+funding + ICT structure only - no news/macro/on-chain/relative-strength/OI-trend, since
+those need per-coin config or accumulated history that doesn't scale across many assets) so
+scanning ~25 assets takes under a minute instead of running the full pipeline ~25 times.
+Filter/sort presets include highest-confidence longs/shorts, strong structure signals,
+unusual funding, low-risk setups, and high-conviction setups. Treat a strong scanner result
+as a reason to open the full Coin Analysis view for that asset, not as a final answer by
+itself - it's missing several of the signals the full analysis has.
 
 ## Whale Watchlist
 
@@ -123,7 +147,8 @@ list.
 - `ict.py` - pure ICT/smart-money structure math (swing points, liquidity pools, FVGs, market structure), no I/O
 - `data_sources.py` - all the API calls, including the free wallet/position lookup
 - `bitcoin_intel_agent.py` - fuses signals into a score; `run_analysis(coin)` is the reusable entry point
-- `dashboard.py` - Streamlit live web UI on top of `run_analysis`, with real OHLC candlesticks and the Whale Watchlist
+- `screener.py` - lightweight multi-asset scan across the top-volume universe, reuses `compute_ict_structure` from `bitcoin_intel_agent.py`
+- `dashboard.py` - Streamlit live web UI: Coin Analysis (full analysis + candlesticks + Whale Watchlist) and Market Scanner menus
 
 ## Not in this version
 

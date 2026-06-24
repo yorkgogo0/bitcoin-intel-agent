@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
+import screener
 from bitcoin_intel_agent import HISTORY_FILE, log_run, run_analysis
 from data_sources import fetch_hl_candles, fetch_wallet_state
 
@@ -66,15 +67,26 @@ st.title("Hyperliquid Coin Intelligence")
 st.caption("Transparent rule-based heuristics, not financial advice. Never connects to a wallet or executes trades.")
 st.caption("ICT/smart-money concepts are widely followed by retail traders too - treat as structure context, not a hidden edge.")
 
-coin = st.sidebar.selectbox("Coin", COINS)
-chart_label = st.sidebar.radio("Chart timeframe", list(CHART_INTERVALS.keys()), index=1, horizontal=True)
-refresh_seconds = st.sidebar.slider("Refresh every (seconds)", min_value=10, max_value=120, value=30, step=5)
-st.sidebar.caption("Kept at 10s minimum to stay well within the free APIs' rate limits.")
-
+page = st.sidebar.radio("Menu", ["Coin Analysis", "Market Scanner"])
 st.sidebar.divider()
-watch_input = st.sidebar.text_area("Track wallets (one address per line)", height=100)
-st.sidebar.caption("Read-only - public position data for any address. Doesn't connect a wallet or place trades.")
-watch_addresses = [a.strip() for a in watch_input.splitlines() if a.strip()]
+
+# Defaults so the render() fragment decorator below (evaluated at parse time, regardless of
+# which page is selected) never sees an undefined name.
+coin, chart_label, refresh_seconds, watch_addresses, scan_top_n = "BTC", "Day", 30, [], 25
+
+if page == "Coin Analysis":
+    coin = st.sidebar.selectbox("Coin", COINS)
+    chart_label = st.sidebar.radio("Chart timeframe", list(CHART_INTERVALS.keys()), index=1, horizontal=True)
+    refresh_seconds = st.sidebar.slider("Refresh every (seconds)", min_value=10, max_value=120, value=30, step=5)
+    st.sidebar.caption("Kept at 10s minimum to stay well within the free APIs' rate limits.")
+
+    st.sidebar.divider()
+    watch_input = st.sidebar.text_area("Track wallets (one address per line)", height=100)
+    st.sidebar.caption("Read-only - public position data for any address. Doesn't connect a wallet or place trades.")
+    watch_addresses = [a.strip() for a in watch_input.splitlines() if a.strip()]
+else:
+    scan_top_n = st.sidebar.slider("Universe size (top N by 24h volume)", min_value=10, max_value=50, value=25, step=5)
+    st.sidebar.caption("Capped to top-volume assets on purpose - the long tail of ~230 tradable assets is mostly thin/zero-volume markets, not more opportunity. See README.")
 
 
 @st.fragment(run_every=f"{refresh_seconds}s")
@@ -195,10 +207,6 @@ def render(coin, chart_label):
             st.caption("Not enough history yet for a chart - it builds up as this keeps refreshing.")
 
 
-render(coin, chart_label)
-
-
-@st.fragment(run_every=f"{refresh_seconds}s")
 def render_watchlist(addresses):
     if not addresses:
         return
@@ -225,4 +233,54 @@ def render_watchlist(addresses):
                 st.caption("No open positions right now.")
 
 
-render_watchlist(watch_addresses)
+FILTER_PRESETS = {
+    "All": lambda df: df,
+    "Highest-confidence longs": lambda df: df[(df["bias"] == "Long")].sort_values("confidence", ascending=False),
+    "Highest-confidence shorts": lambda df: df[(df["bias"] == "Short")].sort_values("confidence", ascending=False),
+    "Strong bullish structure": lambda df: df[df["structure_signal"].isin(["bullish_bos", "bullish_choch"])],
+    "Strong bearish structure": lambda df: df[df["structure_signal"].isin(["bearish_bos", "bearish_choch"])],
+    "Unusual funding (crowded either way)": lambda df: df.reindex(df["funding_annualized_pct"].abs().sort_values(ascending=False).index),
+    "Low-risk setups": lambda df: df.sort_values("risk_score"),
+    "High-conviction setups": lambda df: df.sort_values("signal_quality", ascending=False),
+}
+
+
+def render_scanner(top_n):
+    st.subheader("Market Scanner")
+    st.caption(
+        "Lightweight technical + funding + structure score across the top-volume universe - "
+        "not the full 8-signal analysis used for BTC/ETH/SOL/HYPE above. Use a strong result here "
+        "as a reason to switch to Coin Analysis for that asset, not as a final answer on its own."
+    )
+    if st.button("Scan Market", type="primary"):
+        with st.spinner(f"Scanning top {top_n} assets by volume - takes about {top_n * 1.6:.0f}s..."):
+            results, skipped = screener.scan(top_n=top_n)
+        st.session_state["scan_results"] = results
+        st.session_state["scan_skipped"] = skipped
+
+    results = st.session_state.get("scan_results")
+    if not results:
+        st.caption("Click Scan Market to run it.")
+        return
+
+    skipped = st.session_state.get("scan_skipped", [])
+    if skipped:
+        st.warning(f"{len(skipped)} asset(s) skipped due to a data error: {[s['coin'] for s in skipped]}")
+
+    df = pd.DataFrame(results)
+    preset = st.selectbox("Filter/sort preset", list(FILTER_PRESETS.keys()))
+    filtered = FILTER_PRESETS[preset](df)
+
+    display_cols = [
+        "coin", "price", "bull_score", "bear_score", "risk_score", "confidence",
+        "signal_quality", "structure_signal", "funding_annualized_pct", "risk_reward", "bias", "day_volume_usd",
+    ]
+    st.dataframe(filtered[display_cols], use_container_width=True, hide_index=True)
+    st.caption(f"{len(filtered)} of {len(df)} scanned assets shown. Scanned at your last click - not auto-refreshing.")
+
+
+if page == "Coin Analysis":
+    render(coin, chart_label)
+    render_watchlist(watch_addresses)
+else:
+    render_scanner(scan_top_n)

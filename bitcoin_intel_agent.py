@@ -285,18 +285,38 @@ def invalidation_level(daily, bias):
     return None
 
 
-def apply_no_trade_rules(bias, confidence, supporting, conflicting, risk_reward, min_confidence=70.0):
-    """A missed trade beats a bad trade: override to No Trade on a weak case, even if the
-    raw score crossed the Long/Short threshold."""
+CONFIDENCE_TIERS = [(70.0, "Full"), (60.0, "Normal"), (50.0, "Small")]
+
+
+def classify_confidence_tier(confidence):
+    """Provisional thresholds (not yet backtested - there isn't enough logged history to
+    tune them on yet). The tiering mechanism is sound regardless of where the exact cutoffs
+    end up once review_recommendations() has enough graded history to validate against."""
+    for threshold, tier in CONFIDENCE_TIERS:
+        if confidence >= threshold:
+            return tier
+    return None
+
+
+def apply_no_trade_rules(bias, confidence, supporting, conflicting, risk_reward):
+    """A missed trade beats a bad trade - but instead of one hard confidence cutoff, weaker
+    (still-positive) evidence gets a smaller position instead of being blocked outright.
+    Conflicting signals and poor risk/reward still block entirely regardless of confidence -
+    those are evidence-quality gates, not a frequency dial."""
     if bias not in ("Long", "Short"):
-        return bias, None
-    if confidence < min_confidence:
-        return "No Trade", f"confidence {confidence:.0f}% is below the {min_confidence:.0f}% minimum to act"
+        return bias, None, None, None
+
+    tier = classify_confidence_tier(confidence)
+    if tier is None:
+        return "No Trade", f"confidence {confidence:.0f}% is below the 50% minimum to act", None, "low_confidence"
     if len(conflicting) >= len(supporting):
-        return "No Trade", f"signals conflict ({len(supporting)} supporting vs {len(conflicting)} conflicting)"
+        return (
+            "No Trade", f"signals conflict ({len(supporting)} supporting vs {len(conflicting)} conflicting)",
+            None, "signals_conflict",
+        )
     if risk_reward is not None and risk_reward < 1.0:
-        return "No Trade", f"risk/reward is {risk_reward:.2f} - risking more than the potential reward"
-    return bias, None
+        return "No Trade", f"risk/reward is {risk_reward:.2f} - risking more than the potential reward", None, "poor_risk_reward"
+    return bias, None, tier, None
 
 
 def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value, oi_usd):
@@ -314,27 +334,50 @@ def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, 
 
 RECOMMENDATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recommendations.csv")
 REC_FIELDS = [
-    "timestamp_utc", "coin", "final_bias", "raw_bias", "override_reason", "bull_score", "risk_score",
-    "confidence", "entry_price", "stop_price", "target_price", "risk_reward",
+    "timestamp_utc", "coin", "final_bias", "raw_bias", "override_reason", "rejection_rule", "size_tier",
+    "bull_score", "risk_score", "confidence", "entry_price", "stop_price", "target_price", "risk_reward",
     "supporting_signals", "conflicting_signals", "outcome", "outcome_checked_at",
 ]
 
 
-def log_recommendation(timestamp, coin, final_bias, raw_bias, override_reason, bull_score, risk_score,
-                        confidence, entry_price, stop_price, target_price, risk_reward, supporting, conflicting):
+def log_recommendation(timestamp, coin, final_bias, raw_bias, override_reason, rejection_rule, size_tier,
+                        bull_score, risk_score, confidence, entry_price, stop_price, target_price,
+                        risk_reward, supporting, conflicting):
     """Durable record for post-trade review - this is what future self-review reads from,
-    not history.csv (which just tracks score trends, not individual recommendations)."""
+    not history.csv (which just tracks score trends, not individual recommendations).
+    `rejection_rule` makes "how many were rejected, by which rule" directly queryable."""
     is_new = not os.path.exists(RECOMMENDATIONS_FILE)
     with open(RECOMMENDATIONS_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         if is_new:
             writer.writerow(REC_FIELDS)
         writer.writerow([
-            timestamp, coin, final_bias, raw_bias, override_reason or "", f"{bull_score:.1f}", f"{risk_score:.1f}",
-            f"{confidence:.1f}", f"{entry_price:.4f}", stop_price if stop_price is None else f"{stop_price:.4f}",
-            target_price if target_price is None else f"{target_price:.4f}", risk_reward if risk_reward is None else f"{risk_reward:.2f}",
+            timestamp, coin, final_bias, raw_bias, override_reason or "", rejection_rule or "", size_tier or "",
+            f"{bull_score:.1f}", f"{risk_score:.1f}", f"{confidence:.1f}", f"{entry_price:.4f}",
+            stop_price if stop_price is None else f"{stop_price:.4f}",
+            target_price if target_price is None else f"{target_price:.4f}",
+            risk_reward if risk_reward is None else f"{risk_reward:.2f}",
             " | ".join(supporting), " | ".join(conflicting), "", "",
         ])
+
+
+def rejection_summary():
+    """How many potential trades got declined, and by which specific rule - the actual data
+    needed to answer "is any rule overly restrictive," instead of guessing."""
+    if not os.path.exists(RECOMMENDATIONS_FILE):
+        return {"total": 0, "rejected": 0, "by_rule": {}, "by_tier": {}}
+    with open(RECOMMENDATIONS_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    by_rule, by_tier = {}, {}
+    rejected = 0
+    for row in rows:
+        if row["rejection_rule"]:
+            rejected += 1
+            by_rule[row["rejection_rule"]] = by_rule.get(row["rejection_rule"], 0) + 1
+        elif row["size_tier"]:
+            by_tier[row["size_tier"]] = by_tier.get(row["size_tier"], 0) + 1
+    return {"total": len(rows), "rejected": rejected, "by_rule": by_rule, "by_tier": by_tier}
 
 
 def review_recommendations(coin, current_price, max_age_hours=168):
@@ -426,9 +469,11 @@ def run_analysis(coin="BTC"):
         reward_amt = abs(target - daily["price"])
         risk_reward = reward_amt / risk_amt if risk_amt else None
 
-    bias, override_reason = apply_no_trade_rules(raw_bias, confidence, supporting, conflicting, risk_reward)
+    bias, override_reason, size_tier, rejection_rule = apply_no_trade_rules(raw_bias, confidence, supporting, conflicting, risk_reward)
     if override_reason:
         reasons.append(f"No Trade: {override_reason}")
+    elif size_tier:
+        reasons.append(f"Position sizing tier: {size_tier} ({confidence:.0f}% confidence)")
 
     try:
         weekly_candles = fetch_hl_candles(coin, "1w", limit=500)
@@ -446,8 +491,8 @@ def run_analysis(coin="BTC"):
 
     if raw_bias in ("Long", "Short"):
         log_recommendation(
-            timestamp, coin, bias, raw_bias, override_reason, bull_score, risk_score, confidence,
-            daily["price"], invalidation, target, risk_reward, supporting, conflicting,
+            timestamp, coin, bias, raw_bias, override_reason, rejection_rule, size_tier, bull_score, risk_score,
+            confidence, daily["price"], invalidation, target, risk_reward, supporting, conflicting,
         )
 
     return {
@@ -461,6 +506,7 @@ def run_analysis(coin="BTC"):
         "bias": bias,
         "raw_bias": raw_bias,
         "override_reason": override_reason,
+        "size_tier": size_tier,
         "confidence": confidence,
         "support": daily["recent_low"],
         "resistance": daily["recent_high"],
@@ -496,6 +542,8 @@ def main(coin="BTC"):
     print(f"Trade Bias: {report['bias']}" + (f" (raw call was {report['raw_bias']})" if report["override_reason"] else ""))
     if report["override_reason"]:
         print(f"  -> overridden to No Trade: {report['override_reason']}")
+    elif report["size_tier"]:
+        print(f"  -> Position size tier: {report['size_tier']}")
     print(f"Confidence: {report['confidence']:.0f}%")
     print()
     print(f"Open Interest: ${report['open_interest_usd']:,.0f}  |  24h Volume: ${report['day_volume_usd']:,.0f}")
