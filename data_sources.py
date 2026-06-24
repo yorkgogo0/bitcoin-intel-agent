@@ -70,6 +70,32 @@ def fetch_hyperliquid_market_ctx(coin="BTC"):
     }
 
 
+def fetch_wallet_state(address):
+    """Read-only, public, free for any address - no key, no wallet connection, no trading authority."""
+    resp = requests.post(HYPERLIQUID_INFO_URL, json={"type": "clearinghouseState", "user": address}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+    positions = []
+    for entry in data.get("assetPositions", []):
+        pos = entry["position"]
+        size = float(pos["szi"])
+        if size == 0:
+            continue
+        positions.append(
+            {
+                "coin": pos["coin"],
+                "side": "Long" if size > 0 else "Short",
+                "size": abs(size),
+                "leverage": pos["leverage"]["value"],
+                "entry_price": float(pos["entryPx"]),
+                "position_value_usd": float(pos["positionValue"]),
+                "unrealized_pnl": float(pos["unrealizedPnl"]),
+                "liquidation_price": float(pos["liquidationPx"]) if pos.get("liquidationPx") else None,
+            }
+        )
+    return {"account_value_usd": float(data["marginSummary"]["accountValue"]), "positions": positions}
+
+
 def fetch_fred_latest(series_id):
     """Returns None if FRED_API_KEY isn't set - macro is an optional signal."""
     api_key = os.environ.get("FRED_API_KEY")

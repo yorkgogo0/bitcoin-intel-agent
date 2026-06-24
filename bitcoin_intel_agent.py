@@ -2,7 +2,7 @@
 
 import csv
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -111,7 +111,20 @@ def compute_ict_structure(daily_candles, current_price):
     }
 
 
-def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict):
+def relative_strength_vs_btc(coin, daily_candles):
+    """True relative-strength comparison (own 1d return vs BTC's, same window) - not a composite-score
+    comparison, since BTC and the coin's own scores blend different inputs and aren't directly comparable."""
+    if coin == "BTC" or len(daily_candles) < 2:
+        return None
+    btc_candles = fetch_hl_candles("BTC", "1d", limit=2)
+    if len(btc_candles) < 2:
+        return None
+    coin_chg = (daily_candles[-1]["close"] - daily_candles[-2]["close"]) / daily_candles[-2]["close"] * 100
+    btc_chg = (btc_candles[-1]["close"] - btc_candles[-2]["close"]) / btc_candles[-2]["close"] * 100
+    return {"coin_change_pct": coin_chg, "btc_change_pct": btc_chg, "relative_pct": coin_chg - btc_chg}
+
+
+def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baseline, rel_strength):
     weighted_score = sum(r["score"] * TIMEFRAME_WEIGHTS[r["interval"]] for r in timeframe_results)
     reasons = [r for tr in timeframe_results for r in tr["reasons"]]
     risk_score = 30.0
@@ -154,6 +167,47 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict):
         vol_pct = daily["atr"] / daily["price"] * 100
         risk_score += min(20.0, vol_pct * 3)
         reasons.append(f"Volatility: daily ATR is {vol_pct:.1f}% of price")
+
+    if oi_baseline is not None:
+        price_chg = (daily["price"] - oi_baseline["price"]) / oi_baseline["price"] * 100
+        oi_chg = (funding["open_interest_usd"] - oi_baseline["oi_usd"]) / oi_baseline["oi_usd"] * 100
+        h = oi_baseline["hours_ago"]
+        if oi_chg > 2 and price_chg > 0:
+            weighted_score += 4
+            reasons.append(f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - trend backed by fresh positioning")
+        elif oi_chg > 2 and price_chg < 0:
+            risk_score += 5
+            reasons.append(f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - new positions building against price, squeeze risk either way")
+        elif oi_chg < -2 and price_chg > 0:
+            weighted_score -= 2
+            reasons.append(f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - rally may be short-covering, not fresh conviction")
+        elif oi_chg < -2 and price_chg < 0:
+            weighted_score += 2
+            reasons.append(f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - de-leveraging selloff, downside may be exhausting")
+        else:
+            reasons.append(f"OI/price: roughly flat over {h:.1f}h, no strong divergence")
+    else:
+        reasons.append("OI/price: not enough run history yet (builds up as this keeps running)")
+
+    if rel_strength is not None:
+        rel = rel_strength["relative_pct"]
+        if rel > 2:
+            weighted_score += 3
+            reasons.append(
+                f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
+                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - outperforming the broader market"
+            )
+        elif rel < -2:
+            weighted_score -= 3
+            reasons.append(
+                f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
+                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - underperforming the broader market"
+            )
+        else:
+            reasons.append(
+                f"Relative strength: tracking BTC closely "
+                f"({rel_strength['coin_change_pct']:+.1f}% vs {rel_strength['btc_change_pct']:+.1f}%)"
+            )
 
     structure = ict["structure"]
     structure_text = {
@@ -219,17 +273,41 @@ def invalidation_level(daily, bias):
     return None
 
 
-def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value):
+def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value, oi_usd):
     is_new = not os.path.exists(HISTORY_FILE)
     with open(HISTORY_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         if is_new:
             writer.writerow(
-                ["timestamp_utc", "coin", "price", "bull_score", "risk_score", "regime", "trade_bias", "confidence", "fear_greed"]
+                ["timestamp_utc", "coin", "price", "bull_score", "risk_score", "regime", "trade_bias", "confidence", "fear_greed", "open_interest_usd"]
             )
         writer.writerow(
-            [timestamp, coin, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value]
+            [timestamp, coin, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value, f"{oi_usd:.2f}"]
         )
+
+
+def find_oi_price_baseline(coin, target_hours_ago=24):
+    """Closest history.csv row to `target_hours_ago` for this coin, or the oldest available if we
+    don't have that much history yet. Returns None if there's no usable history at all."""
+    if not os.path.exists(HISTORY_FILE):
+        return None
+    rows = []
+    with open(HISTORY_FILE, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("coin") == coin and row.get("open_interest_usd"):
+                rows.append(row)
+    if not rows:
+        return None
+
+    now = datetime.now(timezone.utc)
+    target = now - timedelta(hours=target_hours_ago)
+
+    def parsed_time(row):
+        return datetime.strptime(row["timestamp_utc"].replace(" UTC", ""), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+
+    best = min(rows, key=lambda r: abs((parsed_time(r) - target).total_seconds()))
+    hours_ago = (now - parsed_time(best)).total_seconds() / 3600
+    return {"price": float(best["price"]), "oi_usd": float(best["open_interest_usd"]), "hours_ago": hours_ago}
 
 
 def run_analysis(coin="BTC"):
@@ -247,8 +325,16 @@ def run_analysis(coin="BTC"):
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
     hourly = next(r for r in timeframe_results if r["interval"] == "1h")
     ict = compute_ict_structure(daily["candles"], daily["price"])
+    oi_baseline = find_oi_price_baseline(coin)
 
-    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding, macro, ict)
+    try:
+        rel_strength = relative_strength_vs_btc(coin, daily["candles"])
+    except requests.exceptions.RequestException:
+        rel_strength = None
+
+    bull_score, risk_score, confidence, reasons = fuse(
+        timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baseline, rel_strength
+    )
     regime = classify_regime(bull_score)
     bias = trade_bias(bull_score, risk_score)
     invalidation = invalidation_level(daily, bias)
@@ -331,7 +417,7 @@ def main(coin="BTC"):
 
     log_run(
         report["timestamp"], coin, report["price"], report["bull_score"], report["risk_score"],
-        report["regime"], report["bias"], report["confidence"], report["fear_greed"],
+        report["regime"], report["bias"], report["confidence"], report["fear_greed"], report["open_interest_usd"],
     )
 
 

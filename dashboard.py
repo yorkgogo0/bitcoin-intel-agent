@@ -8,7 +8,7 @@ import requests
 import streamlit as st
 
 from bitcoin_intel_agent import HISTORY_FILE, log_run, run_analysis
-from data_sources import fetch_hl_candles
+from data_sources import fetch_hl_candles, fetch_wallet_state
 
 COINS = ["BTC", "ETH", "SOL", "HYPE"]
 CHART_INTERVALS = {"Hour": "1h", "Day": "1d", "Week": "1w"}
@@ -71,6 +71,11 @@ chart_label = st.sidebar.radio("Chart timeframe", list(CHART_INTERVALS.keys()), 
 refresh_seconds = st.sidebar.slider("Refresh every (seconds)", min_value=10, max_value=120, value=30, step=5)
 st.sidebar.caption("Kept at 10s minimum to stay well within the free APIs' rate limits.")
 
+st.sidebar.divider()
+watch_input = st.sidebar.text_area("Track wallets (one address per line)", height=100)
+st.sidebar.caption("Read-only - public position data for any address. Doesn't connect a wallet or place trades.")
+watch_addresses = [a.strip() for a in watch_input.splitlines() if a.strip()]
+
 
 @st.fragment(run_every=f"{refresh_seconds}s")
 def render(coin, chart_label):
@@ -82,7 +87,7 @@ def render(coin, chart_label):
 
     log_run(
         report["timestamp"], coin, report["price"], report["bull_score"], report["risk_score"],
-        report["regime"], report["bias"], report["confidence"], report["fear_greed"],
+        report["regime"], report["bias"], report["confidence"], report["fear_greed"], report["open_interest_usd"],
     )
 
     gauges = st.columns(4)
@@ -177,3 +182,33 @@ def render(coin, chart_label):
 
 
 render(coin, chart_label)
+
+
+@st.fragment(run_every=f"{refresh_seconds}s")
+def render_watchlist(addresses):
+    if not addresses:
+        return
+    st.divider()
+    st.subheader("Whale Watchlist")
+    for address in addresses:
+        try:
+            wallet = fetch_wallet_state(address)
+        except requests.exceptions.RequestException as exc:
+            st.warning(f"{address}: couldn't load ({exc})")
+            continue
+
+        total_pnl = sum(p["unrealized_pnl"] for p in wallet["positions"])
+        label = f"{address}  -  account value ${wallet['account_value_usd']:,.0f}  -  unrealized P&L ${total_pnl:,.0f}"
+        with st.expander(label, expanded=True):
+            if total_pnl > 0:
+                st.success(f"Net unrealized P&L: +${total_pnl:,.0f}")
+            elif total_pnl < 0:
+                st.error(f"Net unrealized P&L: -${abs(total_pnl):,.0f}")
+            if wallet["positions"]:
+                pos_df = pd.DataFrame(wallet["positions"])
+                st.dataframe(pos_df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No open positions right now.")
+
+
+render_watchlist(watch_addresses)

@@ -73,22 +73,42 @@ level. Worth being honest about: ICT/SMC concepts are extremely popular among re
 traders now, which cuts against them being a hidden edge - treat the levels as useful
 structure, not a guarantee.
 
+For non-BTC coins, a **relative-strength check** compares the coin's own 1-day return to
+BTC's 1-day return over the same window (true relative strength - not a comparison of
+composite scores, which blend different inputs and aren't directly comparable). Tracking
+BTC closely is neutral; meaningfully outperforming or underperforming it is a real,
+cheap-to-compute divergence signal. Open interest is also now tracked over time (logged
+to `history.csv`) so each run compares current OI to ~24h ago against price's own move
+over the same window - rising OI with rising price reads as trend confirmation; rising OI
+against falling price reads as a crowd building against price (squeeze risk either way).
+
 Each run appends a row to `history.csv` (gitignored - it's your local run history, now
-tagged per coin) so you can track Bull Score/Risk Score over time.
+tagged per coin) so you can track Bull Score/Risk Score/OI over time.
+
+## Whale Watchlist
+
+The dashboard has a sidebar field to paste wallet addresses (one per line). For each one
+it shows current account value, open positions, leverage, entry price, unrealized P&L, and
+liquidation price - all from Hyperliquid's own free public API (`clearinghouseState`), no
+key needed, since position data for any address is public. This is **read-only**: it never
+connects a wallet or places trades. Finding *which* wallets are worth watching is a
+separate problem this tool doesn't solve - [HyperTracker](https://hypertracker.io) has a
+free-tier API (100 requests/day, no card) with a real leaderboard if you want a starting
+list.
 
 ## Project layout
 
 - `indicators.py` - pure technical-indicator math (SMA, EMA, RSI, StochRSI, MACD, Bollinger Bands, ATR), no I/O
 - `ict.py` - pure ICT/smart-money structure math (swing points, liquidity pools, FVGs, market structure), no I/O
-- `data_sources.py` - all the API calls
+- `data_sources.py` - all the API calls, including the free wallet/position lookup
 - `bitcoin_intel_agent.py` - fuses signals into a score; `run_analysis(coin)` is the reusable entry point
-- `dashboard.py` - Streamlit live web UI on top of `run_analysis`, with real OHLC candlesticks
+- `dashboard.py` - Streamlit live web UI on top of `run_analysis`, with real OHLC candlesticks and the Whale Watchlist
 
 ## Not in this version
 
 Still no Kafka/streaming, no database, no ML model, no rigorous backtesting, no
-wallet/whale tracking, no X/Twitter (no free API tier). This is a starting point to build
-on, not the full system envisioned in the original research.
+automated trade execution or copy-trading, no X/Twitter (no free API tier). This is a
+starting point to build on, not the full system envisioned in the original research.
 
 **This is not financial advice.** Bull/Risk scores are simple, transparent heuristics for
 research and learning, not predictions, and this script never touches a wallet, exchange
