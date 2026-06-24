@@ -99,6 +99,8 @@ def render(coin, chart_label):
     badges = st.columns(2)
     colored_box(badges[0], "Market Regime", report["regime"], good={"Bull", "Strong Bull"}, bad={"Bear", "Strong Bear"})
     colored_box(badges[1], "Trade Bias", report["bias"], good={"Long"}, bad={"Short"})
+    if report["override_reason"]:
+        st.info(f"Raw call was **{report['raw_bias']}**, overridden to **No Trade**: {report['override_reason']}")
 
     row2 = st.columns(3)
     row2[0].metric("Price", f"${report['price']:,.2f}")
@@ -152,6 +154,18 @@ def render(coin, chart_label):
     )
     if report["ath"]:
         st.caption(f"All-time high: ${report['ath']:,.2f}  |  All-time low: ${report['atl']:,.2f}")
+    if report["risk_reward"] is not None:
+        st.caption(f"Risk/Reward: {report['risk_reward']:.2f}" + (" - below 1.0, risking more than the reward" if report["risk_reward"] < 1 else ""))
+
+    sig_cols = st.columns(2)
+    with sig_cols[0]:
+        st.subheader(f"Supporting ({len(report['supporting_signals'])})")
+        for s in report["supporting_signals"]:
+            st.write(f"- {s}")
+    with sig_cols[1]:
+        st.subheader(f"Conflicting ({len(report['conflicting_signals'])})")
+        for s in report["conflicting_signals"]:
+            st.write(f"- {s}")
 
     st.subheader("Key Reasons")
     for reason in report["reasons"]:
