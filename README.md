@@ -9,6 +9,7 @@ APIs, no streaming infrastructure, no database - just a script you run on demand
 - **Price/technical** - [Binance public market data](https://data-api.binance.vision) (BTCUSDT klines, 1h/4h/1d)
 - **On-chain** - [mempool.space API](https://mempool.space/docs/api) (difficulty adjustment trend)
 - **Sentiment** - [Alternative.me Fear & Greed Index](https://alternative.me/crypto/fear-and-greed-index/)
+- **Perp funding/OI** - [Hyperliquid public info API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint) (BTC funding rate, open interest)
 
 ## Setup
 
@@ -28,11 +29,13 @@ Each timeframe (1h/4h/1d) gets a 0-100 score from price vs. moving averages, RSI
 Stochastic RSI, MACD momentum, and Bollinger Band extension, then the three are weighted
 toward the daily chart. Fear & Greed is applied as a contrarian tilt (extreme fear nudges
 the score up, extreme greed nudges it down) and also raises the Risk Score when it's at
-an extreme. On-chain difficulty trend adds a small fundamental tilt. Daily ATR (volatility)
-feeds the Risk Score and sets the Invalidation level (1.5x ATR from price). Confidence
-drops when timeframes disagree or sentiment is extreme. All of this is transparent
-rule-based logic, not a trained ML model - see "Key Reasons" in the output for exactly
-what drove each score.
+an extreme. On-chain difficulty trend adds a small fundamental tilt. Hyperliquid's BTC
+funding rate gets the same contrarian treatment - crowded longs (positive funding) nudge
+the score down, crowded shorts nudge it up, and extreme funding raises the Risk Score.
+Daily ATR (volatility) feeds the Risk Score and sets the Invalidation level (1.5x ATR from
+price). Confidence drops when timeframes disagree or sentiment is extreme. All of this is
+transparent rule-based logic, not a trained ML model - see "Key Reasons" in the output for
+exactly what drove each score.
 
 Each run appends a row to `history.csv` (gitignored - it's your local run history) so
 you can track Bull Score/Risk Score over time.

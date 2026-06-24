@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import requests
 
-from data_sources import fetch_fear_greed, fetch_klines, fetch_onchain_signal
+from data_sources import fetch_fear_greed, fetch_hyperliquid_funding, fetch_klines, fetch_onchain_signal
 from indicators import atr, bollinger_bands, macd_histogram, rsi, sma, stoch_rsi
 
 TIMEFRAME_WEIGHTS = {"1h": 0.25, "4h": 0.35, "1d": 0.40}
@@ -73,7 +73,7 @@ def analyze_timeframe(interval):
     }
 
 
-def fuse(timeframe_results, fear_greed, onchain):
+def fuse(timeframe_results, fear_greed, onchain, funding):
     weighted_score = sum(r["score"] * TIMEFRAME_WEIGHTS[r["interval"]] for r in timeframe_results)
     reasons = [r for tr in timeframe_results for r in tr["reasons"]]
     risk_score = 30.0
@@ -90,6 +90,16 @@ def fuse(timeframe_results, fear_greed, onchain):
     reasons.append(
         f"On-chain: next difficulty adjustment {diff_change:+.1f}% "
         f"(hashrate {'growing' if diff_change > 0 else 'declining'})"
+    )
+
+    # Crowded-long/short contrarian tilt, same idea as Fear & Greed, capped so it can't dominate.
+    annualized = funding["annualized_pct"]
+    weighted_score += max(-8.0, min(8.0, -annualized * 0.1))
+    risk_score += min(15.0, abs(annualized) * 0.15)
+    reasons.append(
+        f"Hyperliquid funding: {annualized:+.1f}% annualized "
+        f"({'longs crowded, paying shorts' if annualized > 0 else 'shorts crowded, paying longs'}), "
+        f"OI ${funding['open_interest_usd']:,.0f}"
     )
 
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
@@ -158,11 +168,12 @@ def main():
         timeframe_results = [analyze_timeframe(tf) for tf in TIMEFRAME_WEIGHTS]
         fear_greed = fetch_fear_greed()
         onchain = fetch_onchain_signal()
+        funding = fetch_hyperliquid_funding()
     except requests.exceptions.RequestException as exc:
         print(f"Data source unavailable, aborting: {exc}")
         return
 
-    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain)
+    bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding)
     regime = classify_regime(bull_score)
     bias = trade_bias(bull_score, risk_score)
 
