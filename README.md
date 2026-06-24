@@ -163,6 +163,21 @@ separate problem this tool doesn't solve - [HyperTracker](https://hypertracker.i
 free-tier API (100 requests/day, no card) with a real leaderboard if you want a starting
 list.
 
+## Wallet ranking (`wallet_ranking.py`)
+
+Give it a list of addresses and it ranks them by real historical performance using
+Hyperliquid's free `portfolio` endpoint - PnL-per-dollar-of-volume-traded, not raw PnL
+(which just favors big accounts) or account-value ROI (the portfolio API's starting balance
+is often a tracking-start artifact, not a real deposit, which makes it an unreliable
+denominator). Also characterizes each wallet's current style (position count, leverage,
+long/short bias, equity concentration) from `clearinghouseState`.
+
+**Worth knowing going in:** sorting by a short window (a day or a week) on third-party
+leaderboards can surface wallets that are deep net losers all-time but currently on a hot
+streak - confirmed this with a real batch of 15 addresses, where 3 of them had all-time PnL
+between -$3M and -$9.8M despite positive recent weeks. Always check `all_time_pnl` isn't
+masked by a good `week_pnl`/`month_pnl` before trusting a short-window ranking.
+
 ## Project layout
 
 - `indicators.py` - pure technical-indicator math (SMA, EMA, RSI, StochRSI, MACD, Bollinger Bands, ATR), no I/O
@@ -171,6 +186,7 @@ list.
 - `bitcoin_intel_agent.py` - fuses signals into a score; `run_analysis(coin)` is the reusable entry point
 - `screener.py` - lightweight multi-asset scan across the top-volume universe, reuses `compute_ict_structure` from `bitcoin_intel_agent.py`
 - `backtest.py` - walk-forward historical backtest, reuses the live scoring/no-trade functions rather than reimplementing them
+- `wallet_ranking.py` - ranks a list of addresses by real historical performance (`portfolio` endpoint) and current trading style
 - `dashboard.py` - Streamlit live web UI: Coin Analysis (full analysis + candlesticks + Whale Watchlist) and Market Scanner menus
 
 ## Not in this version
