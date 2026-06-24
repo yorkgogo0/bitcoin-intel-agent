@@ -461,7 +461,10 @@ def run_analysis(coin="BTC"):
     regime = classify_regime(bull_score)
     raw_bias = trade_bias(bull_score, risk_score)
     invalidation = invalidation_level(daily, raw_bias)
-    target = nearest_target(raw_bias, daily["price"], ict["pools_above"] + ict["pools_below"], ict["open_gaps"])
+    stop_distance = abs(daily["price"] - invalidation) if invalidation else 0
+    target = nearest_target(
+        raw_bias, daily["price"], ict["pools_above"] + ict["pools_below"], ict["open_gaps"], min_distance=stop_distance
+    )
 
     risk_reward = None
     if invalidation and target:
