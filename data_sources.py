@@ -1,27 +1,32 @@
 """I/O for the Bitcoin Intelligence Agent. All sources are free; only FRED needs a key."""
 
 import os
+import time
 
 import requests
 
-BINANCE_BASE = "https://data-api.binance.vision/api/v3"
 MEMPOOL_BASE = "https://mempool.space/api"
 FNG_URL = "https://api.alternative.me/fng/"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 REQUEST_TIMEOUT = 10
 
+INTERVAL_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
-def fetch_klines(symbol, interval, limit=210):
-    resp = requests.get(
-        f"{BINANCE_BASE}/klines",
-        params={"symbol": symbol, "interval": interval, "limit": limit},
+
+def fetch_hl_candles(coin, interval, limit=210):
+    """OHLCV straight from Hyperliquid - works for any coin listed there, including ones not on Binance."""
+    end = int(time.time() * 1000)
+    start = end - INTERVAL_MS[interval] * limit
+    resp = requests.post(
+        HYPERLIQUID_INFO_URL,
+        json={"type": "candleSnapshot", "req": {"coin": coin, "interval": interval, "startTime": start, "endTime": end}},
         timeout=REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
     return [
-        {"open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4])}
-        for row in resp.json()
+        {"time": c["t"], "open": float(c["o"]), "high": float(c["h"]), "low": float(c["l"]), "close": float(c["c"])}
+        for c in resp.json()
     ]
 
 
@@ -38,18 +43,20 @@ def fetch_onchain_signal():
     return {"difficulty_change_pct": resp.json()["difficultyChange"]}
 
 
-def fetch_hyperliquid_funding(coin="BTC"):
+def fetch_hyperliquid_market_ctx(coin="BTC"):
     resp = requests.post(HYPERLIQUID_INFO_URL, json={"type": "metaAndAssetCtxs"}, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     universe, contexts = resp.json()
     idx = next(i for i, asset in enumerate(universe["universe"]) if asset["name"] == coin)
     ctx = contexts[idx]
     hourly_rate = float(ctx["funding"])
+    mark_price = float(ctx["markPx"])
     return {
         "hourly_rate": hourly_rate,
         "annualized_pct": hourly_rate * 24 * 365 * 100,
-        "open_interest_usd": float(ctx["openInterest"]) * float(ctx["markPx"]),
-        "mark_price": float(ctx["markPx"]),
+        "open_interest_usd": float(ctx["openInterest"]) * mark_price,
+        "day_volume_usd": float(ctx["dayNtlVlm"]),
+        "mark_price": mark_price,
     }
 
 

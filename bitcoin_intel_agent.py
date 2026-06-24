@@ -9,8 +9,8 @@ import requests
 from data_sources import (
     fetch_fear_greed,
     fetch_fred_latest,
-    fetch_hyperliquid_funding,
-    fetch_klines,
+    fetch_hl_candles,
+    fetch_hyperliquid_market_ctx,
     fetch_onchain_signal,
 )
 from indicators import atr, bollinger_bands, macd_histogram, rsi, sma, stoch_rsi
@@ -20,8 +20,8 @@ HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history
 FRED_DOLLAR_INDEX_SERIES = "DTWEXBGS"  # Nominal Broad U.S. Dollar Index
 
 
-def analyze_timeframe(interval):
-    candles = fetch_klines("BTCUSDT", interval)
+def analyze_timeframe(interval, coin):
+    candles = fetch_hl_candles(coin, interval)
     closes = [c["close"] for c in candles]
     price = closes[-1]
     sma20, sma50 = sma(closes, 20), sma(closes, 50)
@@ -77,6 +77,7 @@ def analyze_timeframe(interval):
         "recent_high": max(c["high"] for c in candles[-30:]),
         "recent_low": min(c["low"] for c in candles[-30:]),
         "atr": atr(candles),
+        "candles": candles,
     }
 
 
@@ -92,12 +93,13 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro):
     risk_score += abs(fg - 50) * 0.3
     reasons.append(f"Sentiment: Fear & Greed Index at {fg} ({fear_greed['label']})")
 
-    diff_change = onchain["difficulty_change_pct"]
-    weighted_score += 3 if diff_change > 0 else -3
-    reasons.append(
-        f"On-chain: next difficulty adjustment {diff_change:+.1f}% "
-        f"(hashrate {'growing' if diff_change > 0 else 'declining'})"
-    )
+    if onchain is not None:
+        diff_change = onchain["difficulty_change_pct"]
+        weighted_score += 3 if diff_change > 0 else -3
+        reasons.append(
+            f"On-chain: next difficulty adjustment {diff_change:+.1f}% "
+            f"(hashrate {'growing' if diff_change > 0 else 'declining'})"
+        )
 
     # Crowded-long/short contrarian tilt, same idea as Fear & Greed, capped so it can't dominate.
     annualized = funding["annualized_pct"]
@@ -106,11 +108,11 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro):
     reasons.append(
         f"Hyperliquid funding: {annualized:+.1f}% annualized "
         f"({'longs crowded, paying shorts' if annualized > 0 else 'shorts crowded, paying longs'}), "
-        f"OI ${funding['open_interest_usd']:,.0f}"
+        f"OI ${funding['open_interest_usd']:,.0f}, 24h vol ${funding['day_volume_usd']:,.0f}"
     )
 
     if macro is not None:
-        # Broad dollar index as a BTC headwind/tailwind proxy: a stronger dollar
+        # Broad dollar index as a risk-asset headwind/tailwind proxy: a stronger dollar
         # historically coincides with weaker risk-asset performance, and vice versa.
         weighted_score += -macro["change_pct"] * 2
         reasons.append(f"Macro: broad USD index {macro['change_pct']:+.2f}% vs prior reading")
@@ -165,63 +167,89 @@ def invalidation_level(daily, bias):
     return None
 
 
-def log_run(timestamp, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value):
+def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value):
     is_new = not os.path.exists(HISTORY_FILE)
     with open(HISTORY_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         if is_new:
             writer.writerow(
-                ["timestamp_utc", "price", "bull_score", "risk_score", "regime", "trade_bias", "confidence", "fear_greed"]
+                ["timestamp_utc", "coin", "price", "bull_score", "risk_score", "regime", "trade_bias", "confidence", "fear_greed"]
             )
         writer.writerow(
-            [timestamp, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value]
+            [timestamp, coin, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value]
         )
 
 
-def main():
-    try:
-        timeframe_results = [analyze_timeframe(tf) for tf in TIMEFRAME_WEIGHTS]
-        fear_greed = fetch_fear_greed()
-        onchain = fetch_onchain_signal()
-        funding = fetch_hyperliquid_funding()
-    except requests.exceptions.RequestException as exc:
-        print(f"Data source unavailable, aborting: {exc}")
-        return
+def run_analysis(coin="BTC"):
+    """Fetches all data and computes one report for `coin`. Raises requests.RequestException on hard failure."""
+    timeframe_results = [analyze_timeframe(tf, coin) for tf in TIMEFRAME_WEIGHTS]
+    fear_greed = fetch_fear_greed()
+    onchain = fetch_onchain_signal() if coin == "BTC" else None
+    funding = fetch_hyperliquid_market_ctx(coin)
 
     try:
         macro = fetch_fred_latest(FRED_DOLLAR_INDEX_SERIES)
-    except requests.exceptions.RequestException as exc:
-        print(f"Macro data unavailable ({exc}), continuing without it.")
+    except requests.exceptions.RequestException:
         macro = None
 
     bull_score, risk_score, confidence, reasons = fuse(timeframe_results, fear_greed, onchain, funding, macro)
     regime = classify_regime(bull_score)
     bias = trade_bias(bull_score, risk_score)
-
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
+    hourly = next(r for r in timeframe_results if r["interval"] == "1h")
     invalidation = invalidation_level(daily, bias)
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    return {
+        "coin": coin,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "price": daily["price"],
+        "price_history": [(c["time"], c["close"]) for c in hourly["candles"]],
+        "bull_score": bull_score,
+        "risk_score": risk_score,
+        "regime": regime,
+        "bias": bias,
+        "confidence": confidence,
+        "support": daily["recent_low"],
+        "resistance": daily["recent_high"],
+        "invalidation": invalidation,
+        "open_interest_usd": funding["open_interest_usd"],
+        "day_volume_usd": funding["day_volume_usd"],
+        "fear_greed": fear_greed["value"],
+        "reasons": reasons,
+    }
+
+
+def main(coin="BTC"):
+    try:
+        report = run_analysis(coin)
+    except requests.exceptions.RequestException as exc:
+        print(f"Data source unavailable, aborting: {exc}")
+        return
 
     print("=" * 60)
-    print(f"BITCOIN INTELLIGENCE REPORT - {now}")
+    print(f"{coin} INTELLIGENCE REPORT - {report['timestamp']}")
     print("=" * 60)
-    print(f"Price: ${daily['price']:,.2f}")
-    print(f"Bull Score: {bull_score:.0f}/100")
-    print(f"Risk Score: {risk_score:.0f}/100")
-    print(f"Market Regime: {regime}")
-    print(f"Trade Bias: {bias}")
-    print(f"Confidence: {confidence:.0f}%")
+    print(f"Price: ${report['price']:,.2f}")
+    print(f"Bull Score: {report['bull_score']:.0f}/100")
+    print(f"Risk Score: {report['risk_score']:.0f}/100")
+    print(f"Market Regime: {report['regime']}")
+    print(f"Trade Bias: {report['bias']}")
+    print(f"Confidence: {report['confidence']:.0f}%")
     print()
-    print(f"Support: ${daily['recent_low']:,.2f}  |  Resistance: ${daily['recent_high']:,.2f}")
-    if invalidation:
-        print(f"Invalidation (1.5x daily ATR): ${invalidation:,.2f}")
+    print(f"Open Interest: ${report['open_interest_usd']:,.0f}  |  24h Volume: ${report['day_volume_usd']:,.0f}")
+    print(f"Support: ${report['support']:,.2f}  |  Resistance: ${report['resistance']:,.2f}")
+    if report["invalidation"]:
+        print(f"Invalidation (1.5x daily ATR): ${report['invalidation']:,.2f}")
     print()
     print("Key Reasons:")
-    for reason in reasons:
+    for reason in report["reasons"]:
         print(f"  - {reason}")
     print("=" * 60)
 
-    log_run(now, daily["price"], bull_score, risk_score, regime, bias, confidence, fear_greed["value"])
+    log_run(
+        report["timestamp"], coin, report["price"], report["bull_score"], report["risk_score"],
+        report["regime"], report["bias"], report["confidence"], report["fear_greed"],
+    )
 
 
 if __name__ == "__main__":
