@@ -85,6 +85,27 @@ against falling price reads as a crowd building against price (squeeze risk eith
 Each run appends a row to `history.csv` (gitignored - it's your local run history, now
 tagged per coin) so you can track Bull Score/Risk Score/OI over time.
 
+## No-trade rules and recommendation logging
+
+Every signal that contributes to the Bull Score is tagged as **supporting** or
+**conflicting** relative to the final call, not just dumped into one flat list. A raw
+Long/Short call gets overridden to **No Trade** if any of these hold:
+
+- Confidence is below 70%
+- Conflicting signals outnumber (or tie) supporting signals
+- Risk/Reward is below 1.0 (Invalidation is farther from price than Target)
+
+"A missed trade is preferable to a bad trade" - these are deliberately conservative, not
+tuned to maximize how often a trade gets recommended.
+
+Every Long/Short call (whether or not it survives the no-trade filter) gets logged to
+`recommendations.csv` (gitignored) with the full reasoning, confidence, entry/stop/target,
+risk/reward, and the supporting/conflicting signal lists - a durable record for reviewing
+later. `review_recommendations(coin, current_price)` grades past calls that haven't been
+graded yet: did price hit the target, the stop, or is it still open. This is the actual
+data a future signal-reweighting pass would need - there's no shortcut to it without a
+real logged history to review.
+
 ## Whale Watchlist
 
 The dashboard has a sidebar field to paste wallet addresses (one per line). For each one

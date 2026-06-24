@@ -125,89 +125,90 @@ def relative_strength_vs_btc(coin, daily_candles):
 
 
 def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baseline, rel_strength):
+    signal_log = []  # {"text": ..., "contribution": float} - contribution drives supporting/conflicting later
+
+    def add(contribution, text):
+        signal_log.append({"text": text, "contribution": contribution})
+        return contribution
+
     weighted_score = sum(r["score"] * TIMEFRAME_WEIGHTS[r["interval"]] for r in timeframe_results)
-    reasons = [r for tr in timeframe_results for r in tr["reasons"]]
     risk_score = 30.0
 
     # Treated as a contrarian extremity signal (per conventional Fear & Greed usage),
     # not momentum: extreme fear nudges Bull Score up, extreme greed nudges it down.
     fg = fear_greed["value"]
-    weighted_score += (50 - fg) * 0.10
+    weighted_score += add((50 - fg) * 0.10, f"Sentiment: Fear & Greed Index at {fg} ({fear_greed['label']})")
     risk_score += abs(fg - 50) * 0.3
-    reasons.append(f"Sentiment: Fear & Greed Index at {fg} ({fear_greed['label']})")
 
     if onchain is not None:
         diff_change = onchain["difficulty_change_pct"]
-        weighted_score += 3 if diff_change > 0 else -3
-        reasons.append(
+        weighted_score += add(
+            3 if diff_change > 0 else -3,
             f"On-chain: next difficulty adjustment {diff_change:+.1f}% "
-            f"(hashrate {'growing' if diff_change > 0 else 'declining'})"
+            f"(hashrate {'growing' if diff_change > 0 else 'declining'})",
         )
 
     # Crowded-long/short contrarian tilt, same idea as Fear & Greed, capped so it can't dominate.
     annualized = funding["annualized_pct"]
-    weighted_score += max(-8.0, min(8.0, -annualized * 0.1))
-    risk_score += min(15.0, abs(annualized) * 0.15)
-    reasons.append(
+    weighted_score += add(
+        max(-8.0, min(8.0, -annualized * 0.1)),
         f"Hyperliquid funding: {annualized:+.1f}% annualized "
         f"({'longs crowded, paying shorts' if annualized > 0 else 'shorts crowded, paying longs'}), "
-        f"OI ${funding['open_interest_usd']:,.0f}, 24h vol ${funding['day_volume_usd']:,.0f}"
+        f"OI ${funding['open_interest_usd']:,.0f}, 24h vol ${funding['day_volume_usd']:,.0f}",
     )
+    risk_score += min(15.0, abs(annualized) * 0.15)
 
     if macro is not None:
         # Broad dollar index as a risk-asset headwind/tailwind proxy: a stronger dollar
         # historically coincides with weaker risk-asset performance, and vice versa.
-        weighted_score += -macro["change_pct"] * 2
-        reasons.append(f"Macro: broad USD index {macro['change_pct']:+.2f}% vs prior reading")
+        weighted_score += add(-macro["change_pct"] * 2, f"Macro: broad USD index {macro['change_pct']:+.2f}% vs prior reading")
     else:
-        reasons.append("Macro: skipped (set FRED_API_KEY to enable)")
+        signal_log.append({"text": "Macro: skipped (set FRED_API_KEY to enable)", "contribution": 0})
 
     daily = next(r for r in timeframe_results if r["interval"] == "1d")
     if daily["atr"]:
         vol_pct = daily["atr"] / daily["price"] * 100
         risk_score += min(20.0, vol_pct * 3)
-        reasons.append(f"Volatility: daily ATR is {vol_pct:.1f}% of price")
+        signal_log.append({"text": f"Volatility: daily ATR is {vol_pct:.1f}% of price", "contribution": 0})
 
     if oi_baseline is not None:
         price_chg = (daily["price"] - oi_baseline["price"]) / oi_baseline["price"] * 100
         oi_chg = (funding["open_interest_usd"] - oi_baseline["oi_usd"]) / oi_baseline["oi_usd"] * 100
         h = oi_baseline["hours_ago"]
         if oi_chg > 2 and price_chg > 0:
-            weighted_score += 4
-            reasons.append(f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - trend backed by fresh positioning")
+            weighted_score += add(4, f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - trend backed by fresh positioning")
         elif oi_chg > 2 and price_chg < 0:
             risk_score += 5
-            reasons.append(f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - new positions building against price, squeeze risk either way")
+            signal_log.append({
+                "text": f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - new positions building against price, squeeze risk either way",
+                "contribution": 0,
+            })
         elif oi_chg < -2 and price_chg > 0:
-            weighted_score -= 2
-            reasons.append(f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - rally may be short-covering, not fresh conviction")
+            weighted_score += add(-2, f"OI/price: OI {oi_chg:+.1f}% while price {price_chg:+.1f}% over {h:.1f}h - rally may be short-covering, not fresh conviction")
         elif oi_chg < -2 and price_chg < 0:
-            weighted_score += 2
-            reasons.append(f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - de-leveraging selloff, downside may be exhausting")
+            weighted_score += add(2, f"OI/price: OI {oi_chg:+.1f}%, price {price_chg:+.1f}% over {h:.1f}h - de-leveraging selloff, downside may be exhausting")
         else:
-            reasons.append(f"OI/price: roughly flat over {h:.1f}h, no strong divergence")
+            signal_log.append({"text": f"OI/price: roughly flat over {h:.1f}h, no strong divergence", "contribution": 0})
     else:
-        reasons.append("OI/price: not enough run history yet (builds up as this keeps running)")
+        signal_log.append({"text": "OI/price: not enough run history yet (builds up as this keeps running)", "contribution": 0})
 
     if rel_strength is not None:
         rel = rel_strength["relative_pct"]
         if rel > 2:
-            weighted_score += 3
-            reasons.append(
-                f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
-                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - outperforming the broader market"
+            weighted_score += add(
+                3, f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
+                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - outperforming the broader market",
             )
         elif rel < -2:
-            weighted_score -= 3
-            reasons.append(
-                f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
-                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - underperforming the broader market"
+            weighted_score += add(
+                -3, f"Relative strength: {rel_strength['coin_change_pct']:+.1f}% vs BTC's "
+                f"{rel_strength['btc_change_pct']:+.1f}% over 1d - underperforming the broader market",
             )
         else:
-            reasons.append(
-                f"Relative strength: tracking BTC closely "
-                f"({rel_strength['coin_change_pct']:+.1f}% vs {rel_strength['btc_change_pct']:+.1f}%)"
-            )
+            signal_log.append({
+                "text": f"Relative strength: tracking BTC closely ({rel_strength['coin_change_pct']:+.1f}% vs {rel_strength['btc_change_pct']:+.1f}%)",
+                "contribution": 0,
+            })
 
     structure = ict["structure"]
     structure_text = {
@@ -218,18 +219,23 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baselin
     }
     structure_tilt = {"bullish_bos": 8, "bullish_choch": 6, "bearish_bos": -8, "bearish_choch": -6}
     if structure["signal"] in structure_tilt:
-        weighted_score += structure_tilt[structure["signal"]]
-        reasons.append(structure_text[structure["signal"]])
+        weighted_score += add(structure_tilt[structure["signal"]], structure_text[structure["signal"]])
     else:
-        reasons.append(f"Structure: {structure['trend']}, no fresh break of structure")
+        signal_log.append({"text": f"Structure: {structure['trend']}, no fresh break of structure", "contribution": 0})
 
     if ict["zone"] is not None:
         zone_tilt = 3 if ict["zone"]["zone"] == "discount" else -3
-        weighted_score += zone_tilt
-        reasons.append(
-            f"ICT zone: price in {ict['zone']['zone']} "
-            f"({ict['zone']['pct_of_range'] * 100:.0f}% of recent swing range)"
+        weighted_score += add(
+            zone_tilt,
+            f"ICT zone: price in {ict['zone']['zone']} ({ict['zone']['pct_of_range'] * 100:.0f}% of recent swing range)",
         )
+
+    # Per-timeframe technical reasons: classify each timeframe as supporting or conflicting
+    # by whether its own score leans the same direction as the final call (added below, once known).
+    for tr in timeframe_results:
+        tr_contribution = (tr["score"] - 50) * TIMEFRAME_WEIGHTS[tr["interval"]]
+        for text in tr["reasons"]:
+            signal_log.append({"text": text, "contribution": tr_contribution})
 
     scores = [r["score"] for r in timeframe_results]
     disagreement = max(scores) - min(scores)
@@ -238,7 +244,13 @@ def fuse(timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baselin
 
     bull_score = max(0.0, min(100.0, weighted_score))
     risk_score = max(0.0, min(100.0, risk_score))
-    return bull_score, risk_score, confidence, reasons
+
+    reasons = [s["text"] for s in signal_log]
+    direction = 1 if bull_score >= 50 else -1
+    supporting = [s["text"] for s in signal_log if s["contribution"] * direction > 0]
+    conflicting = [s["text"] for s in signal_log if s["contribution"] * direction < 0]
+
+    return bull_score, risk_score, confidence, reasons, supporting, conflicting
 
 
 def classify_regime(bull_score):
@@ -273,6 +285,20 @@ def invalidation_level(daily, bias):
     return None
 
 
+def apply_no_trade_rules(bias, confidence, supporting, conflicting, risk_reward, min_confidence=70.0):
+    """A missed trade beats a bad trade: override to No Trade on a weak case, even if the
+    raw score crossed the Long/Short threshold."""
+    if bias not in ("Long", "Short"):
+        return bias, None
+    if confidence < min_confidence:
+        return "No Trade", f"confidence {confidence:.0f}% is below the {min_confidence:.0f}% minimum to act"
+    if len(conflicting) >= len(supporting):
+        return "No Trade", f"signals conflict ({len(supporting)} supporting vs {len(conflicting)} conflicting)"
+    if risk_reward is not None and risk_reward < 1.0:
+        return "No Trade", f"risk/reward is {risk_reward:.2f} - risking more than the potential reward"
+    return bias, None
+
+
 def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, confidence, fg_value, oi_usd):
     is_new = not os.path.exists(HISTORY_FILE)
     with open(HISTORY_FILE, "a", newline="") as f:
@@ -284,6 +310,60 @@ def log_run(timestamp, coin, daily_price, bull_score, risk_score, regime, bias, 
         writer.writerow(
             [timestamp, coin, f"{daily_price:.2f}", f"{bull_score:.1f}", f"{risk_score:.1f}", regime, bias, f"{confidence:.1f}", fg_value, f"{oi_usd:.2f}"]
         )
+
+
+RECOMMENDATIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recommendations.csv")
+REC_FIELDS = [
+    "timestamp_utc", "coin", "final_bias", "raw_bias", "override_reason", "bull_score", "risk_score",
+    "confidence", "entry_price", "stop_price", "target_price", "risk_reward",
+    "supporting_signals", "conflicting_signals", "outcome", "outcome_checked_at",
+]
+
+
+def log_recommendation(timestamp, coin, final_bias, raw_bias, override_reason, bull_score, risk_score,
+                        confidence, entry_price, stop_price, target_price, risk_reward, supporting, conflicting):
+    """Durable record for post-trade review - this is what future self-review reads from,
+    not history.csv (which just tracks score trends, not individual recommendations)."""
+    is_new = not os.path.exists(RECOMMENDATIONS_FILE)
+    with open(RECOMMENDATIONS_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(REC_FIELDS)
+        writer.writerow([
+            timestamp, coin, final_bias, raw_bias, override_reason or "", f"{bull_score:.1f}", f"{risk_score:.1f}",
+            f"{confidence:.1f}", f"{entry_price:.4f}", stop_price if stop_price is None else f"{stop_price:.4f}",
+            target_price if target_price is None else f"{target_price:.4f}", risk_reward if risk_reward is None else f"{risk_reward:.2f}",
+            " | ".join(supporting), " | ".join(conflicting), "", "",
+        ])
+
+
+def review_recommendations(coin, current_price, max_age_hours=168):
+    """Grades past Long/Short recommendations that haven't been graded yet: did price hit the
+    target, the stop, or neither so far? This is the actual data the self-improvement loop
+    needs - without it, "adjust signal weighting" has nothing real to adjust from."""
+    if not os.path.exists(RECOMMENDATIONS_FILE):
+        return []
+    rows = []
+    with open(RECOMMENDATIONS_FILE, newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    now = datetime.now(timezone.utc)
+    results = []
+    for row in rows:
+        if row["coin"] != coin or row["final_bias"] not in ("Long", "Short") or row["outcome"]:
+            continue
+        rec_time = datetime.strptime(row["timestamp_utc"].replace(" UTC", ""), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        age_hours = (now - rec_time).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            continue
+
+        stop, target = float(row["stop_price"]), float(row["target_price"])
+        if row["final_bias"] == "Long":
+            outcome = "hit_target" if current_price >= target else "hit_stop" if current_price <= stop else "open"
+        else:
+            outcome = "hit_target" if current_price <= target else "hit_stop" if current_price >= stop else "open"
+        results.append({**row, "computed_outcome": outcome, "age_hours": age_hours})
+    return results
 
 
 def find_oi_price_baseline(coin, target_hours_ago=24):
@@ -332,13 +412,23 @@ def run_analysis(coin="BTC"):
     except requests.exceptions.RequestException:
         rel_strength = None
 
-    bull_score, risk_score, confidence, reasons = fuse(
+    bull_score, risk_score, confidence, reasons, supporting, conflicting = fuse(
         timeframe_results, fear_greed, onchain, funding, macro, ict, oi_baseline, rel_strength
     )
     regime = classify_regime(bull_score)
-    bias = trade_bias(bull_score, risk_score)
-    invalidation = invalidation_level(daily, bias)
-    target = nearest_target(bias, daily["price"], ict["pools_above"] + ict["pools_below"], ict["open_gaps"])
+    raw_bias = trade_bias(bull_score, risk_score)
+    invalidation = invalidation_level(daily, raw_bias)
+    target = nearest_target(raw_bias, daily["price"], ict["pools_above"] + ict["pools_below"], ict["open_gaps"])
+
+    risk_reward = None
+    if invalidation and target:
+        risk_amt = abs(daily["price"] - invalidation)
+        reward_amt = abs(target - daily["price"])
+        risk_reward = reward_amt / risk_amt if risk_amt else None
+
+    bias, override_reason = apply_no_trade_rules(raw_bias, confidence, supporting, conflicting, risk_reward)
+    if override_reason:
+        reasons.append(f"No Trade: {override_reason}")
 
     try:
         weekly_candles = fetch_hl_candles(coin, "1w", limit=500)
@@ -352,20 +442,33 @@ def run_analysis(coin="BTC"):
     except requests.exceptions.RequestException:
         headlines = []
 
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    if raw_bias in ("Long", "Short"):
+        log_recommendation(
+            timestamp, coin, bias, raw_bias, override_reason, bull_score, risk_score, confidence,
+            daily["price"], invalidation, target, risk_reward, supporting, conflicting,
+        )
+
     return {
         "coin": coin,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "timestamp": timestamp,
         "price": daily["price"],
         "price_history": [(c["time"], c["close"]) for c in hourly["candles"]],
         "bull_score": bull_score,
         "risk_score": risk_score,
         "regime": regime,
         "bias": bias,
+        "raw_bias": raw_bias,
+        "override_reason": override_reason,
         "confidence": confidence,
         "support": daily["recent_low"],
         "resistance": daily["recent_high"],
         "invalidation": invalidation,
         "target": target,
+        "risk_reward": risk_reward,
+        "supporting_signals": supporting,
+        "conflicting_signals": conflicting,
         "ath": ath,
         "atl": atl,
         "open_interest_usd": funding["open_interest_usd"],
@@ -390,7 +493,9 @@ def main(coin="BTC"):
     print(f"Bull Score: {report['bull_score']:.0f}/100")
     print(f"Risk Score: {report['risk_score']:.0f}/100")
     print(f"Market Regime: {report['regime']}")
-    print(f"Trade Bias: {report['bias']}")
+    print(f"Trade Bias: {report['bias']}" + (f" (raw call was {report['raw_bias']})" if report["override_reason"] else ""))
+    if report["override_reason"]:
+        print(f"  -> overridden to No Trade: {report['override_reason']}")
     print(f"Confidence: {report['confidence']:.0f}%")
     print()
     print(f"Open Interest: ${report['open_interest_usd']:,.0f}  |  24h Volume: ${report['day_volume_usd']:,.0f}")
@@ -399,6 +504,9 @@ def main(coin="BTC"):
         print(f"Invalidation (1.5x daily ATR): ${report['invalidation']:,.2f}")
     if report["target"]:
         print(f"Target (nearest liquidity/FVG): ${report['target']:,.2f}")
+    if report["risk_reward"] is not None:
+        print(f"Risk/Reward: {report['risk_reward']:.2f}")
+    print(f"Signals: {len(report['supporting_signals'])} supporting, {len(report['conflicting_signals'])} conflicting")
     if report["ath"]:
         print(f"All-time high (since listing): ${report['ath']:,.2f}  |  All-time low: ${report['atl']:,.2f}")
     print()
